@@ -19,6 +19,14 @@ import moderngl
 
 from rl_shaders import PARTICLE_VERT, PARTICLE_FRAG, RING_VERT, RING_FRAG
 
+# Flip-reset indicator (RL): a disc in the car's wheel plane whose DIAMETER is the car's length, centred
+# under the middle of the car, 200 ms linear fade. (Octane: ~118 uu long; wheel midpoint ~9 uu ahead of
+# the origin; wheel contact plane 17 uu below it -- 14 keeps it just off the ball it sits on.)
+RESET_DISC_RADIUS = 59.0
+RESET_DISC_FWD = 9.0
+RESET_DISC_BELOW = 14.0
+RESET_DISC_LIFE = 0.20
+
 TRAIL_VERT = """
 #version 330
 uniform mat4 m_vp;
@@ -191,6 +199,8 @@ class FX:
         self.add = ParticlePool(self.CAP)          # additive: flames, sparks, flashes
         self.alpha = ParticlePool(2000)            # premultiplied-over: smoke
         self.rings = []
+        self.reset_discs = []                      # flip-reset indicators, attached to their car
+        self.car_poses = {}                        # car index -> (pos, forward, up), set each frame by main
         self.wheel_glow = {}                       # car idx -> time of last flip reset
         self.screen_flash = 0.0                    # time of last spectated flip reset (2D streaks)
         self.prog = ctx.program(vertex_shader=PARTICLE_VERT, fragment_shader=PARTICLE_FRAG)
@@ -360,6 +370,33 @@ class FX:
         g.arcw = arcw
         self.rings.append(g)
 
+    def _render_reset_discs(self, m_vp_bytes):
+        """Flip-reset discs on their car's wheel plane, depth-tested: whatever the car or the ball hides
+        from the camera is not drawn."""
+        ctx, rp = self.ctx, self.ring_prog
+        rp["m_vp"].write(m_vp_bytes)
+        ctx.disable(moderngl.CULL_FACE)
+        ctx.blend_func = moderngl.ONE, moderngl.ONE_MINUS_SRC_ALPHA
+        rp["mode"].value = 3.0
+        rp["coreCol"].value = (1.0, 1.0, 1.0)
+        rp["width"].value = 0.07
+        rp["radius"].value = RESET_DISC_RADIUS
+        for d in self.reset_discs:
+            pose = self.car_poses.get(d["car"])
+            if pose is None:
+                continue
+            pos, fwd, up = (np.asarray(v, "f4") for v in pose)
+            right = np.cross(up, fwd).astype("f4")
+            center = pos + fwd * RESET_DISC_FWD - up * RESET_DISC_BELOW
+            d["drawn"] += 1
+            k = 1.0 - min(d["age"] / RESET_DISC_LIFE, 1.0)          # linear fade over 200 ms
+            rp["center"].write(center.astype("f4").tobytes())
+            rp["axisU"].write(fwd.astype("f4").tobytes())
+            rp["axisV"].write(right.tobytes())
+            rp["color"].value = (0.93, 0.96, 1.0, 0.95 * k)
+            self.ring_vao.render(moderngl.TRIANGLES)
+        ctx.enable(moderngl.CULL_FACE)
+
     # ---------------------------------------------------------------------------------------- #
     def on_event(self, ev, spectated):
         k = ev["kind"]
@@ -369,10 +406,12 @@ class FX:
             # wheels got the reset (between ball and car), bright rim + sparkles, pops in then fades.
             nrm = np.asarray(ev.get("normal", ev.get("up", (0, 0, 1))), "f4")
             # a crisp white frosted circle at full size from the first frame, then a linear fade: 200 ms total
-            # Camera-facing: lying tangent to the ball it was seen edge-on (a thin line) from the usual
-            # chase angle -- the sound played but the circle often didn't show.
-            self.ring(pos + nrm * 4.0, nrm, 68.0, 68.0, 0.05, 0.08, (0.95, 0.97, 1.0, 0.9), core=(1.0, 1.0, 1.0),
-                      fill=0.55, sparkle=1.0, ontop=True, mode=1, billboard=True)
+            # RL's indicator: a white disc in the car's wheel plane, as long as the car, that stays under
+            # the car (follows it) for 200 ms -- drawn in render() from the car's current pose.
+            car = ev.get("car", -1)
+            if car is not None and car >= 0:
+                self.reset_discs = [d for d in self.reset_discs if d["car"] != car]
+                self.reset_discs.append({"car": car, "age": 0.0, "drawn": 0})
         elif k in ("jump", "doublejump"):
             # RL jump burst: a quick warm flash of light under the chassis, ~75 ms
             up = np.asarray(ev.get("up", (0, 0, 1)), "f4")
@@ -460,6 +499,10 @@ class FX:
                 continue
             g.age += dt
         self.rings = [g for g in self.rings if g.age < g.life or (g.mode and g.drawn < 2)]
+        for d in self.reset_discs:
+            if d["drawn"]:                           # ages only once it has been on screen
+                d["age"] += dt
+        self.reset_discs = [d for d in self.reset_discs if d["age"] < RESET_DISC_LIFE or d["drawn"] < 2]
 
     @staticmethod
     def _strip(pos, cam, width, rgba):
@@ -601,5 +644,7 @@ class FX:
                 if g.ontop:
                     ctx.enable(moderngl.DEPTH_TEST)
             ctx.enable(moderngl.CULL_FACE)
+        if self.reset_discs:
+            self._render_reset_discs(m_vp_bytes)
         ctx.fbo.depth_mask = True
         ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA

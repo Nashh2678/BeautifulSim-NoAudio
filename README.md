@@ -10,12 +10,13 @@ effects, a Rocket League-like camera, and a clip recorder. It never touches the 
 This version ships **without sound and without any Rocket League game files**: every model and texture comes
 from RocketSimVis or is generated procedurally.
 
-![Boosting towards the ball](docs/boost.jpg)
-
-| | |
-|---|---|
-| ![Demolition](docs/demo.jpg) | ![Goal](docs/goal.jpg) |
-| ![Arena overview](docs/overview.jpg) | |
+<p align="center"><img src="docs/boost.jpg" alt="Boosting towards the ball" width="100%"></p>
+<p align="center">
+  <img src="docs/flipreset.jpg" alt="Flip reset indicator" width="49%">
+  <img src="docs/demo.jpg" alt="Demolition" width="49%">
+  <img src="docs/goal.jpg" alt="Goal" width="49%">
+  <img src="docs/overview.jpg" alt="Arena overview" width="49%">
+</p>
 
 ## Installation (Windows)
 
@@ -65,8 +66,9 @@ Supersampled for extra smoothness), distant detail, VSync, frame-rate cap. Camer
 - **Arena**: see-through hexagon walls and ceiling, grass pitch with field markings and team-coloured goal boxes,
   translucent team nets, soft shadows, a low-poly valley with mountains, trees and a lake under an evening sky.
 - **Cars and ball**: team-painted cars, a two-seam ball, boost pads that fade back in while recharging.
-- **Effects**: boost flames, supersonic trails, jump flashes, flip-reset indicator, demolition explosions,
-  goal bursts, boost pad pickups, and a boost gauge.
+- **Effects**: boost flames, supersonic trails, jump flashes, demolition explosions, goal bursts, boost pad
+  pickups, a boost gauge, and a Rocket League-style flip-reset indicator (a white disc under the car's wheels,
+  as long as the car, for 200 ms).
 - **Game events** reconstructed from the state stream: jumps, double jumps, flips (including wall dashes),
   flip resets (only when the reset is really taken on the ball), ball touches, bounces, bumps, demos and goals.
 - **Smooth playback**: incoming states go through a small jitter buffer, so uneven packet timing from a busy

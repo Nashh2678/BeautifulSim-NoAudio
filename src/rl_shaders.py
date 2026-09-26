@@ -601,12 +601,21 @@ uniform float arcWidth;     // cosine falloff for the arc
 uniform float fill;         // faint filled disc inside the ring
 uniform float sparkle;      // >0: frosted disc with twinkling sparkles (flip-reset indicator)
 uniform float seed;
-uniform float mode;         // 0 shockwave ring, 1 crisp badge disc, 2 soft glow disc
+uniform float mode;         // 0 shockwave ring, 1 crisp badge disc, 2 soft glow disc, 3 flip-reset disc
 in vec2 v_xy;
 out vec4 f_color;
 void main() {
     float r = length(v_xy);
     if (r > 1.0) discard;
+    if (mode > 2.5) {                                   // flip-reset disc (RL): clear centre, whiter
+        float aa = max(fwidth(r), 1e-3) * 1.5;          // towards the edge (~r^2), crisp white rim
+        float disc = 1.0 - smoothstep(1.0 - aa, 1.0, r);
+        float body = 0.08 + 0.72 * r * r;
+        float rim = smoothstep(1.0 - width - aa, 1.0 - width, r) * disc;
+        float a = color.a * max(body * disc, rim);
+        f_color = vec4(mix(color.rgb, coreCol, rim) * a, a);
+        return;
+    }
     if (mode > 1.5) {                                   // soft glow: hot core fading to the rim
         float g = pow(1.0 - r, 1.6);
         float a = color.a * g;

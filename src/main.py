@@ -1902,6 +1902,7 @@ class RSVRenderer:
             car_vel = car_state.phys.get_vel(interp_ratio)
             team = int(car_state.team_num) & 1
 
+            self.fx.car_poses[i] = (car_pos, car_forward, car_up)      # flip-reset disc follows the car
             car_model = self._model_matrix(car_pos, car_forward, car_up).tobytes()
             self.prog_car["m_model"].write(car_model)
             self.prog_car["bodyCol"].value = TEAM_BODY[team]
