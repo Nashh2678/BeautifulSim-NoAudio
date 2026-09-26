@@ -62,7 +62,7 @@ class Audio:
     MIN_GAIN = 0.18          # far sounds never fully vanish (RL's arena is small and reverberant)
 
     # sound name prefix -> mixer category (Settings > Audio sliders); anything else = master only
-    CATEGORIES = (("ball_", "ball"), ("bump", "demo"), ("demo", "demo"), ("boost", "boost"),
+    CATEGORIES = (("ball_", "ball"), ("bump", "demo"), ("body", "demo"), ("demo", "demo"), ("boost", "boost"),
                   ("pad_pickup", "boost"), ("engine", "engine"), ("supersonic", "engine"),
                   ("flipreset", "reset"), ("jump", "flips"), ("doublejump", "flips"), ("dodge", "flips"),
                   ("land", "flips"))

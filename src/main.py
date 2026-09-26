@@ -2105,14 +2105,20 @@ class RSVRenderer:
             a.play("bump_{}".format(stage), pos, 1.0, involved)
         elif k == "demo":
             a.play("demo", pos, 1.0)
-            if local:
-                a.play("demo_small_local", pos, 0.8, True)
+            a.play("demo_small" + sfx, pos, 0.8, local)          # the demolished car's own layer
+            if spectated >= 0 and ev.get("by", -1) == spectated:
+                a.play("demolish_stinger", None, 0.8, True)     # RL's "Demolition" stat jingle for YOUR demo
             self.fx.on_event(ev, spectated)
+        elif k == "body":
+            # car body (roof / side / nose) into the floor, a wall or the ceiling
+            g = min(1.0, max(0.25, (ev.get("strength", 0.0) - 200.0) / 1200.0))
+            a.play("body" + sfx, pos, g, local)
         elif k == "pad":
             if local:                                  # RL only plays pickups for your own car
                 a.play("pad_pickup", pos, 0.9, True)
         elif k == "goal":
             a.play("goal_explosion_default", pos, 1.0, True)
+            a.play("goal_explosion", pos, 0.8, True)             # the goal event layer on top
             a.play("goal_horn", None, 0.8, True)
             self.fx.on_event(ev, spectated)
         elif k == "supersonic":

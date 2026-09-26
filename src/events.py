@@ -11,6 +11,7 @@ Rocket League events we want to hear/see are reconstructed here by diffing conse
   ball_hit     a car's ball_touched flag (fallback: ball velocity jump with a car in reach)
   ball_bounce  ball velocity jump with no car touch (floor / wall / ceiling)
   bump         two cars in contact and both velocities jump (no ball touch)
+  body         a car hits the arena with its body (roof / side / nose), not its wheels
   demo         is_demoed false->true
   pad          boost pad active->inactive
   goal         ball fully crossed a goal line
@@ -191,6 +192,37 @@ def arena_distance(p):
     return min(_fillet(h, z, _FILLET_FLOOR), _fillet(h, 2044.0 - z, _FILLET_CEIL))
 
 
+def arena_normal(p, eps=4.0):
+    """Unit normal (pointing into the field) of the closest arena surface, curves included."""
+    gx = arena_distance((p[0] + eps, p[1], p[2])) - arena_distance((p[0] - eps, p[1], p[2]))
+    gy = arena_distance((p[0], p[1] + eps, p[2])) - arena_distance((p[0], p[1] - eps, p[2]))
+    gz = arena_distance((p[0], p[1], p[2] + eps)) - arena_distance((p[0], p[1], p[2] - eps))
+    n = math.sqrt(gx * gx + gy * gy + gz * gz)
+    return (0.0, 0.0, 1.0) if n < 1e-6 else (gx / n, gy / n, gz / n)
+
+
+def goal_frame_distance(p):
+    """Distance from a point to the goal frame (both posts and the crossbar, both goals): the edges where
+    the back wall meets the goal mouth (|x| = 893, |y| = 5120, z <= 642.775 and z = 642.775, |x| <= 893)."""
+    x, y, z = abs(p[0]), abs(p[1]), p[2]
+    dy = y - BACK_WALL_Y
+    post = math.sqrt((x - GOAL_HALF_WIDTH) ** 2 + dy * dy + max(0.0, z - GOAL_HEIGHT) ** 2)
+    bar = math.sqrt(max(0.0, x - GOAL_HALF_WIDTH) ** 2 + dy * dy + (z - GOAL_HEIGHT) ** 2)
+    return min(post, bar)
+
+
+def swept_goal_frame_distance(a, b, steps=8):
+    """Closest approach of the ball centre to the goal frame between two packets (a 2000 uu/s ball moves
+    ~65 uu per 30 Hz packet, so the packet positions alone can straddle the actual contact)."""
+    return min(goal_frame_distance((a[0] + (b[0] - a[0]) * k / steps, a[1] + (b[1] - a[1]) * k / steps,
+                                    a[2] + (b[2] - a[2]) * k / steps)) for k in range(steps + 1))
+
+
+POST_CONTACT = BALL_R + 30.0         # ball centre this close to a post/crossbar edge = it hit the frame
+BODY_NEAR = 120.0                     # car origin within this of a surface can be touching it with its body
+BODY_MIN_DV = 300.0                   # into-surface speed lost in one packet for a body impact
+
+
 # Calibrated on 118 grants in 100 real bot pop-reset clips: ball centre 89..105 uu below the car's
 # origin along -up (p95 lateral offset 47, max 88), car >= 198 uu from every arena surface.
 RESET_ALONG = (80.0, 125.0)
@@ -250,6 +282,7 @@ class EventDetector:
         self.prev_pads = None
         self._pair_cool = {}
         self._reset_cool = {}
+        self._body_cool = {}
         self._goal_cool_until = 0.0
 
     def reset(self):
@@ -302,11 +335,8 @@ class EventDetector:
             i = touchers[0]
             self._emit(t, "ball_hit", bpos, car=i, team=cars[i].team, strength=dvb_mag)
         elif dvb_mag > 300.0:
-            ay = abs(bpos[1])
-            near_post = abs(abs(bpos[0]) - 893.0) < 190.0 and bpos[2] < 760.0
-            near_bar = abs(bpos[2] - 642.775) < 190.0 and abs(bpos[0]) < 1000.0
-            if 4900.0 < ay < 5350.0 and (near_post or near_bar):
-                surf = "post"                               # goal post / crossbar clang
+            if swept_goal_frame_distance(pb[0], bpos) < POST_CONTACT:
+                surf = "post"                               # goal post OR crossbar clang
             elif bpos[2] < 180.0:
                 surf = "floor"
             else:
@@ -328,7 +358,12 @@ class EventDetector:
             if c.demoed:
                 if not p.demoed:
                     demo_now.add(i)
-                    self._emit(t, "demo", p.pos, car=i, team=c.team, vel=p.vel)
+                    # the demolisher: the closest other active car at the moment of the demo
+                    near = [(q, _len(_sub(pc[q].pos, p.pos))) for q in range(len(cars))
+                            if q != i and not cars[q].demoed and not pc[q].demoed]
+                    near = [x for x in near if x[1] < 350.0]
+                    by = min(near, key=lambda x: x[1])[0] if near else -1
+                    self._emit(t, "demo", p.pos, car=i, team=c.team, vel=p.vel, by=by)
                 continue
             if p.demoed:
                 continue                                    # respawn
@@ -398,6 +433,20 @@ class EventDetector:
                 if into > 140.0:
                     self_impulse.add(i)
                     self._emit(t, "land", c.pos, car=i, team=c.team, strength=into)
+
+            # body impact: the car hits the arena (floor / wall / ceiling / curve) with its roof, side, nose or
+            # tail -- a big loss of into-surface speed near a surface that is NOT a landing on the wheels
+            if i not in self_impulse and not c.touched and t >= self._body_cool.get(i, 0.0):
+                d_srf = arena_distance(c.pos)
+                if d_srf < BODY_NEAR:
+                    n = arena_normal(c.pos)
+                    vin_p, vin_c = -_dot(p.vel, n), -_dot(c.vel, n)
+                    wheels_down = _dot(p.up, n) > 0.7     # tilted < 45 deg before the hit: a wheel landing
+                    if vin_p > BODY_MIN_DV and vin_p - vin_c > BODY_MIN_DV and not wheels_down:
+                        self._body_cool[i] = t + 0.3
+                        self_impulse.add(i)
+                        contact = (c.pos[0] - n[0] * d_srf, c.pos[1] - n[1] * d_srf, c.pos[2] - n[2] * d_srf)
+                        self._emit(t, "body", contact, car=i, team=c.team, strength=vin_p - vin_c)
 
             if c.speed >= SUPERSONIC > p.speed:
                 self._emit(t, "supersonic", c.pos, car=i, team=c.team)
