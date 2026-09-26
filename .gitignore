@@ -65,3 +65,9 @@ data/sounds_cache/
 src/rsv_events.log
 # rendered clips + their logs
 clips/
+# your own sound files (only the manifest + README are part of the repo)
+data/sounds/*.ogg
+data/sounds/*.wav
+data/sounds/*.mp3
+data/sounds/*.flac
+data/sounds/engine_src/

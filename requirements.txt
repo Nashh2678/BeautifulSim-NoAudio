@@ -7,3 +7,5 @@ numpy<2
 pywavefront
 pyqt5
 Pillow
+pygame        # sound (only needed if you add sound files to data/sounds/)
+av            # clips with sound: decodes the sound files once

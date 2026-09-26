@@ -270,8 +270,10 @@ _BANK = None
 
 
 def _manifest_sig():
+    """Changes when the manifest OR the set of installed sound files changes (files dropped in later)."""
     st = os.stat(os.path.join(SOUND_DIR, "manifest.json"))
-    return "{}-{}".format(int(st.st_mtime), st.st_size)
+    n = sum(1 for f in os.listdir(SOUND_DIR) if f.lower().endswith((".ogg", ".wav")))
+    return "{}-{}-{}".format(int(st.st_mtime), st.st_size, n)
 
 
 def sound_bank(build=True):
@@ -294,10 +296,14 @@ def sound_bank(build=True):
     parts, files, off = [], {}, 0
     for fns in manifest["sounds"].values():
         for fn in fns:
+            if not os.path.isfile(os.path.join(SOUND_DIR, fn)):
+                continue                                  # not installed: that sound stays silent
             a = np.clip(_decode(os.path.join(SOUND_DIR, fn)) * 32767.0, -32768, 32767).astype("i2")
             files[fn] = (off, len(a))
             parts.append(a)
             off += len(a)
+    if not parts:
+        return None
     os.makedirs(CACHE_DIR, exist_ok=True)
     np.save(bank_p, np.concatenate(parts, 0))
     with open(idx_p, "w") as f:
@@ -322,9 +328,18 @@ class OfflineAudio(rl_audio.Audio):
         self.listener = None
         self.active = True
         mpath = os.path.join(SOUND_DIR, "manifest.json")
-        self.silent = not os.path.exists(mpath)       # build without sounds: video-only clips
-        manifest = {"sounds": {}} if self.silent else json.load(open(mpath, "r"))
-        self.files = manifest["sounds"]
+        manifest = json.load(open(mpath, "r")) if os.path.exists(mpath) else {"sounds": {}}
+        # only the files actually installed (any subset can be dropped into data/sounds/)
+        self.files = {k: [fn for fn in v if os.path.isfile(os.path.join(SOUND_DIR, fn))]
+                      for k, v in manifest["sounds"].items()}
+        self.files = {k: v for k, v in self.files.items() if v}
+        try:
+            import engine_synth
+            engine_ok = all(os.path.isfile(os.path.join(engine_synth.SRC_DIR, "{}.wav".format(l[0])))
+                            for l in engine_synth.LAYERS)
+        except Exception:
+            engine_ok = False
+        self.silent = not self.files and not engine_ok   # nothing installed: video-only clips
         self.engine_rates = list(manifest.get("engine_rates", []))
         self.sounds = {k: [None] * len(v) for k, v in self.files.items()}   # decoded lazily
         self.layers = [(layer, k) for layer in ("engine_a", "engine_b") for k in range(len(self.files.get(layer, [])))]

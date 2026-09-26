@@ -2096,7 +2096,8 @@ class RSVRenderer:
             g = min(1.0, max(0.15, ev.get("strength", 0.0) / 1800.0))
             surf = ev.get("surface")
             kind = "floor" if surf == "floor" else ("post" if surf == "post" else "wall")
-            a.play("ball_bounce_{}_{}".format(kind, band), pos, 1.0 if kind == "post" else g)
+            name = "ball_post_{}".format(band) if kind == "post" else "ball_bounce_{}_{}".format(kind, band)
+            a.play(name, pos, 1.0 if kind == "post" else g)
         elif k == "bump":
             s = ev.get("strength", 0.0)
             stage = 0 if s < 500 else (1 if s < 900 else (2 if s < 1400 else 3))

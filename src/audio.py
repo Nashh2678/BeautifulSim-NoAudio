@@ -1,10 +1,13 @@
-"""Optional game audio. This version ships NO sounds: without data/sounds/manifest.json (a list of
-sound files per event name) the mixer never starts and every method is a silent no-op.
+"""Game audio, spatialised against the camera. This repo ships NO sound files: drop your own into
+data/sounds/ with the file names listed in data/sounds/manifest.json (see data/sounds/README.md). Any
+subset works -- an event with no installed file just stays silent, and with no files at all the mixer
+never starts (every method is a silent no-op).
 
-Design (when a sound set is provided):
+Design:
   * pygame.mixer only (no pygame window). Everything is a one-shot on a mixer channel except the boost
     loop (one looping channel per boosting car) and the spectated car's engine + boost loop, which are
-    streamed to one reserved channel in short blocks by a feeder thread (needs an engine_synth module).
+    synthesised (engine_synth.py, from the loops in data/sounds/engine_src/) and streamed to one
+    reserved channel in short blocks by a feeder thread.
   * Boost: start layer, loop entering 300 ms later (pitched up with car speed), on release the loop
     fades 100 ms / the start layer 300 ms, plus a tail.
   * Spatialisation is done by us: constant-power stereo pan from the camera's right vector + a
@@ -93,7 +96,11 @@ class Audio:
             os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
             import pygame
             self._pg = pygame
-            manifest = json.load(open(os.path.join(SOUND_DIR, "manifest.json"), "r"))
+            mpath = os.path.join(SOUND_DIR, "manifest.json")
+            if not os.path.isfile(mpath):
+                print("[audio] no {} (no sounds installed): running silent".format(mpath))
+                return
+            manifest = json.load(open(mpath, "r"))
             sr = int(manifest.get("sample_rate", 48000))
             pygame.mixer.pre_init(sr, -16, 2, 512)      # 512-sample buffer ~= 11 ms latency
             pygame.mixer.init()
@@ -102,27 +109,45 @@ class Audio:
             # a loop's channel and silently cut it (find_channel(True) skips reserved channels).
             pygame.mixer.set_reserved(self.LOOP_CHANNELS + 1)
             self._loop_free = [pygame.mixer.Channel(i) for i in range(self.LOOP_CHANNELS)]
+            # Only the files actually present are loaded: the manifest lists every event's files, and any
+            # subset of them can be dropped into data/sounds/ (an event with no file just stays silent).
             sounds = {}
             for name, files in manifest["sounds"].items():
                 if name.startswith("engine_"):
                     continue                                # old pre-pitched engine sets: unused now
-                sounds[name] = [pygame.mixer.Sound(os.path.join(SOUND_DIR, fn)) for fn in files]
+                got = [pygame.mixer.Sound(os.path.join(SOUND_DIR, fn)) for fn in files
+                       if os.path.isfile(os.path.join(SOUND_DIR, fn))]
+                if got:
+                    sounds[name] = got
             self.sounds = sounds
-            # boost loop pre-pitched for the other cars (the local one is pitched continuously)
             import numpy as np
-            loop = pygame.sndarray.array(sounds["boost_loop"][0]).astype("f4")
             self._boost_variants = []
-            for cents in self.BOOST_PITCH_STEPS:
-                r = 2.0 ** (cents / 1200.0)
-                t = np.arange(int(len(loop) / r)) * r
-                y = np.stack([np.interp(t, np.arange(len(loop)), loop[:, c], period=len(loop)) for c in range(2)], 1)
-                self._boost_variants.append(pygame.sndarray.make_sound(np.ascontiguousarray(y.astype("<i2"))))
-            import engine_synth
-            self._stream = EngineStream(pygame, pygame.mixer.Channel(self.STREAM_CH), sr,
-                                        engine_synth.EngineSynth(), engine_synth.EngineModel(),
-                                        np.ascontiguousarray(loop / 32768.0))
+            if "boost_loop" in sounds:
+                # boost loop pre-pitched for the other cars (the local one is pitched continuously)
+                loop = pygame.sndarray.array(sounds["boost_loop"][0]).astype("f4")
+                for cents in self.BOOST_PITCH_STEPS:
+                    r = 2.0 ** (cents / 1200.0)
+                    t = np.arange(int(len(loop) / r)) * r
+                    y = np.stack([np.interp(t, np.arange(len(loop)), loop[:, c], period=len(loop)) for c in range(2)], 1)
+                    self._boost_variants.append(pygame.sndarray.make_sound(np.ascontiguousarray(y.astype("<i2"))))
+            else:
+                loop = np.zeros((2, 2), "f4")                  # no boost loop file: silent loop
+            try:
+                import engine_synth
+                synth = engine_synth.EngineSynth()          # .ok False without data/sounds/engine_src/*.wav
+                engine_ok = synth.ok
+            except Exception:
+                engine_synth, engine_ok = None, False
+            if engine_synth is not None and (engine_ok or "boost_loop" in sounds):
+                self._stream = EngineStream(pygame, pygame.mixer.Channel(self.STREAM_CH), sr,
+                                            synth if engine_ok else _SilentSynth(), engine_synth.EngineModel(),
+                                            np.ascontiguousarray(loop / 32768.0))
+            if not sounds and self._stream is None:
+                print("[audio] no sound files in {} (only the manifest): running silent".format(SOUND_DIR))
+                return
             self.ok = True                                  # publish last: calls start working now
-            print("[audio] {} sounds loaded, muted={} volume={:.2f}".format(len(self.sounds), self.muted, self.volume))
+            print("[audio] {} sounds loaded (engine {}), muted={} volume={:.2f}".format(
+                len(self.sounds), "on" if engine_ok else "off", self.muted, self.volume))
         except Exception as e:                             # no device / missing files -> silent
             print("[audio] disabled: {!r}".format(e))
 
@@ -251,7 +276,8 @@ class Audio:
             if st is None:
                 st = self._boost[key] = {"t0": now, "ch": None,
                                          "start_ch": self.play("boost_start", pos, 0.9, local)}
-            if st["ch"] is None and not local and now - st["t0"] >= self.BOOST_LOOP_DELAY and self._loop_free:
+            if (st["ch"] is None and not local and now - st["t0"] >= self.BOOST_LOOP_DELAY and self._loop_free
+                    and self._boost_variants):
                 k = min(range(len(self.BOOST_PITCH_STEPS)),
                         key=lambda i: abs(self.BOOST_PITCH_STEPS[i] - 611.0 * min(1.0, speed / 2300.0)))
                 st["ch"] = self._loop_free.pop()
@@ -302,6 +328,15 @@ class Audio:
             if st.get("ch") is not None:
                 self._loop_free.append(st["ch"])
         self._boost.clear()
+
+
+class _SilentSynth:
+    """Stand-in when the engine source loops aren't installed (the boost loop still streams)."""
+    ok = False
+
+    def render(self, n, params, gl, gr):
+        import numpy as np
+        return np.zeros((n, 2), "f4")
 
 
 class EngineStream:

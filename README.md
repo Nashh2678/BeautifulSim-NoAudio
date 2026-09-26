@@ -7,8 +7,9 @@ It's a fork of [RocketSimVis](https://github.com/ZealanL/RocketSimVis) by Zealan
 training (or any other program) streams game states to it, and it renders them live in a stylized arena with
 effects, a Rocket League-like camera, and a clip recorder. It never touches the simulation, it only watches.
 
-This version ships **without sound and without any Rocket League game files**: every model and texture comes
-from RocketSimVis or is generated procedurally.
+This version ships **without any sound files or Rocket League game files**: every model and texture comes
+from RocketSimVis or is generated procedurally. The sound system is all there, though: drop your own sound
+files into `data/sounds/` and they play (see [Sound](#sound)).
 
 <p align="center"><img src="docs/boost.jpg" alt="Boosting towards the ball" width="100%"></p>
 <p align="center">
@@ -55,11 +56,22 @@ Run several instances side by side with `RSV_PORT=<port>`.
 | P | spectate the player closest to the ball |
 | A | auto camera on/off (follows whoever is closest to the ball) |
 | C | save a clip of the last 12 s (mp4, in `clips/`) |
-| H | show/hide the top-left panel (Edit Settings: camera, graphics) |
+| M | mute (when sound files are installed) |
+| `[` / `]` | volume down / up |
+| H | show/hide the top-left panel (Edit Settings: camera, audio, graphics) |
 
 **Graphics** (H → Edit Settings → Graphics, applied live): anti-aliasing (MSAA off/2x/4x/8x), resolution
 (Balanced caps the 3D scene at 2.1 MP and upscales it: pick Native on a 1440p/4K screen if it looks soft, or
 Supersampled for extra smoothness), distant detail, VSync, frame-rate cap. Camera settings mirror Rocket League's.
+
+## Sound
+
+No sound files are included. `data/sounds/manifest.json` links every game event (jumps, flips, flip resets,
+ball hits by distance, bounces, bumps, demos, boost, goals, pad pickups...) to file names: put `.ogg`/`.wav`
+files with those names in `data/sounds/` and they're used at the next start, positioned in 3D around the
+camera. Any subset works (missing events stay silent), and the engine sound is synthesised from 10 loops
+in `data/sounds/engine_src/`. The full list is in [data/sounds/README.md](data/sounds/README.md). Sound files
+there are git-ignored, so they never get committed by accident.
 
 ## Features
 
@@ -74,7 +86,7 @@ Supersampled for extra smoothness), distant detail, VSync, frame-rate cap. Camer
 - **Smooth playback**: incoming states go through a small jitter buffer, so uneven packet timing from a busy
   trainer doesn't show as stutter.
 - **Clips**: C saves the last 12 s by re-rendering them offscreen at 1080p60 (NVIDIA NVENC when available),
-  so recording never slows the live view.
+  so recording never slows the live view; installed sounds are mixed in.
 
 ## Credits
 
