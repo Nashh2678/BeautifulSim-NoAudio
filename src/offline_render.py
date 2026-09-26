@@ -987,6 +987,7 @@ def render_clip(spec, out_path, workers=None):
     """Render one clip, split across `workers` parallel processes. spec = {"replay": path} | {"pop": path}."""
     t_real = time.perf_counter()
     fps = float(os.environ.get("RSV_CLIP_FPS", "60"))
+    find_ffmpeg()                   # fail early with a clear message (no ffmpeg) instead of "worker(s) failed"
     src = load_source(spec)
     if src is None or len(src["packets"]) < 2:
         raise RuntimeError("not enough packets in {}".format(spec))

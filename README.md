@@ -80,17 +80,17 @@ there are git-ignored, so they never get committed by accident.
 - **Cars and ball**: team-painted cars, a two-seam ball, boost pads that fade back in while recharging.
 - **Effects**: boost flames, supersonic trails, jump flashes, demolition explosions, goal bursts, boost pad
   pickups, a boost gauge, and a Rocket League-style flip-reset indicator (a white disc under the car's wheels,
-  as long as the car, for 200 ms).
+  as long as the car, for 120 ms).
 - **Game events** reconstructed from the state stream: jumps, double jumps, flips (including wall dashes),
   flip resets (only when the reset is really taken on the ball), ball touches, bounces (floor, walls, posts
   and crossbar), car body impacts, bumps, demos and goals.
 - **Smooth playback**: incoming states go through a small jitter buffer, so uneven packet timing from a busy
   trainer doesn't show as stutter.
-- **Clips**: C saves the last 12 s by re-rendering them offscreen at 1080p60 (NVIDIA NVENC when available),
+- **Clips**: C saves the last 12 s by re-rendering them offscreen at 1080p60 (hardware-encoded with NVIDIA NVENC or AMD AMF when available, else on the CPU),
   so recording never slows the live view; installed sounds are mixed in.
 
 ## Credits
 
 - [ZealanL](https://github.com/ZealanL): [RocketSimVis](https://github.com/ZealanL/RocketSimVis), the visualizer this is built on,
-  including its car, ball, arena and boost pad models; and [RocketSim](https://github.com/ZealanL/RocketSim).
+  including its car, arena and boost pad models; and [RocketSim](https://github.com/ZealanL/RocketSim).
 - Rocket League is a trademark of Psyonix. This project is not affiliated with or endorsed by Psyonix or Epic Games.
