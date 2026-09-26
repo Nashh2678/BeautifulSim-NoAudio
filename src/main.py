@@ -329,6 +329,7 @@ class RSVRenderer:
         self.prog_text["m_vp"].write(ortho.astype("f4"))
         self.prog_text["Tex"].value = 0
         self.render_target.use()
+        self.ctx.disable(moderngl.DEPTH_TEST)       # a 2D overlay: the window's depth buffer is never cleared
         self.ctx.enable(moderngl.BLEND)
         self.ctx.blend_func = moderngl.ONE, moderngl.ONE_MINUS_SRC_ALPHA
         for tex, rgba in ((glow, (1.0, 0.55, 0.12, 0.55 * a)), (core, (1.0, 0.80, 0.36, a))):
@@ -423,6 +424,8 @@ class RSVRenderer:
 
         self.ball_ribbon = RibbonEmitter()
         self.ball_trail = RibbonEmitter()      # RL ball trail (last-touch team colour, fast ball only)
+        self._flip_until = {}                  # car -> time its flip streaks stop being emitted
+        self._corner_ribs = {}                 # car -> 4 RibbonEmitters (upper corners of the car)
         self._ball_trail_on = False
         self._goal_banner = None               # (scoring team, time) -> "BLUE SCORED!" / "ORANGE SCORED!"
         self._banner_tex = {}
@@ -1981,6 +1984,7 @@ class RSVRenderer:
             team = int(car_state.team_num) & 1
 
             self.fx.car_poses[i] = (car_pos, car_forward, car_up)      # flip-reset disc follows the car
+            self._update_flip_streaks(i, car_pos, car_forward, car_up, delta_time, car_state.phys.is_teleporting())
             car_model = self._model_matrix(car_pos, car_forward, car_up).tobytes()
             self.prog_car["m_model"].write(car_model)
             self.prog_car["bodyCol"].value = TEAM_BODY[team]
@@ -2155,28 +2159,60 @@ class RSVRenderer:
         return True
 
     # RL ball trail: a ribbon following the ball centre in the colour of the team that touched it last, only
-    # while the ball moves faster than 100 kph; a round tube, each point fading out over 600 ms, white for the
-    # first 50 uu past the ball's surface.
-    BALL_TRAIL_SPEED = 100.0 / 0.036                          # 100 kph in uu/s (1 uu = 1 cm)
+    # while the ball moves faster than 75 kph; a round tube, each point fading out over 600 ms, white for the
+    # first 50 uu past the ball's surface. Once the ball slows under 75 kph the trail keeps being emitted for
+    # 600 ms with a strength going 1 -> 0 (a reverse fade), so it tapers off instead of stopping dead.
+    BALL_TRAIL_SPEED = 75.0 / 0.036                           # 75 kph in uu/s (1 uu = 1 cm)
+    BALL_TRAIL_TAIL = 0.60           # after the ball drops under 75 kph it keeps emitting, fainter and fainter
     BALL_TRAIL_LIFE = 0.60
     TEAM_TRAIL = ((0.30, 0.45, 1.0), (1.0, 0.52, 0.12))
+
+    # Flip streaks: very faint, very thin white lines left by the car's four upper corners while it flips.
+    FLIP_STREAK_EMIT = 0.60          # a dodge's rotation lasts ~0.6 s
+    FLIP_STREAK_LIFE = 0.40          # each point fully faded after 400 ms
+    CAR_TOP_CORNERS = ((74.0, 43.0, 40.0), (74.0, -43.0, 40.0), (-46.0, 43.0, 40.0), (-46.0, -43.0, 40.0))
+
+    def _update_flip_streaks(self, i, car_pos, car_forward, car_up, delta_time, teleported):
+        ribs = self._corner_ribs.get(i)
+        flipping = time.time() < self._flip_until.get(i, 0.0)
+        if ribs is None:
+            if not flipping:
+                return
+            ribs = self._corner_ribs[i] = [RibbonEmitter() for _ in self.CAR_TOP_CORNERS]
+        left = fastvec.cross(car_up, car_forward)
+        for rib, (cx, cy, cz) in zip(ribs, self.CAR_TOP_CORNERS):
+            p = car_pos + car_forward * cx + left * cy + car_up * cz
+            rib.update(flipping, 0, Vector3(p), Vector3((0.0, 0.0, 0.0)), self.FLIP_STREAK_LIFE, delta_time)
+            if teleported:
+                rib.points.clear()
+            if len(rib.points) > 1:
+                self.fx.add_trail(rib, self.FLIP_STREAK_LIFE, 0.9, (1.0, 1.0, 1.0, 0.30))
+        if not flipping and not any(r.points for r in ribs):
+            del self._corner_ribs[i]
 
     def _update_ball_trail(self, state, ball_phys, ball_pos, interp_ratio, delta_time):
         team = rl_events.g_detector.last_touch_team
         hidden = getattr(state, "ball_hidden", False)
-        on = (not hidden and team is not None and state.gamemode != "heatseeker"
-              and ball_phys.get_vel(interp_ratio).length > self.BALL_TRAIL_SPEED)
+        usable = not hidden and team is not None and state.gamemode != "heatseeker"
+        now = time.time()
+        if usable and ball_phys.get_vel(interp_ratio).length > self.BALL_TRAIL_SPEED:
+            self._trail_fast_t = now
+        since = now - getattr(self, "_trail_fast_t", -1e9)
+        k = max(0.0, 1.0 - since / self.BALL_TRAIL_TAIL) if usable else 0.0
+        on = k > 0.0
         if on and not self._ball_trail_on and self.ball_trail.points:
             self.ball_trail.points.clear()                     # restart: never bridge across the gap
         self._ball_trail_on = on
         self.ball_trail.update(on, 0, Vector3(ball_pos), Vector3((0.0, 0.0, 0.0)), self.BALL_TRAIL_LIFE, delta_time)
+        if on and self.ball_trail.points:
+            self.ball_trail.points[0].k = k                    # newest point: emission strength
         if hidden or ball_phys.is_teleporting():
             self.ball_trail.points.clear()
         if len(self.ball_trail.points) > 1 and team is not None:
             self._trail_team = int(team) & 1
         if len(self.ball_trail.points) > 1:
-            self.fx.add_tube(self.ball_trail, self.BALL_TRAIL_LIFE, 28.0,
-                             (*self.TEAM_TRAIL[getattr(self, "_trail_team", 0)], 0.9),
+            self.fx.add_tube(self.ball_trail, self.BALL_TRAIL_LIFE, 20.0,
+                             (*self.TEAM_TRAIL[getattr(self, "_trail_team", 0)], 0.55),
                              white_from=91.25, white_len=50.0)
 
     def _handle_event(self, ev, spectated):
@@ -2186,6 +2222,8 @@ class RSVRenderer:
         car = ev.get("car", -1)
         local = car == spectated and car >= 0
         sfx = "_local" if local else "_other"
+        if k == "dodge" and car >= 0:
+            self._flip_until[car] = time.time() + self.FLIP_STREAK_EMIT
         if k in ("jump", "doublejump", "dodge"):
             a.play(k + sfx, pos, 0.9, local)
             if k != "dodge":
@@ -2217,6 +2255,8 @@ class RSVRenderer:
                 if not self._sound_gate("post", "post", s_):
                     return
                 a.play("ball_post_{}".format(band), pos, min(1.0, max(0.2, s_ / 1500.0)))
+                # the metallic ring on its own: in the premix it is buried under the impact thud
+                a.play("ball_post_ping", pos, min(1.0, max(0.5, s_ / 1200.0)))
             else:
                 if not self._sound_gate("bounce", ("bounce", kind), s_):
                     return

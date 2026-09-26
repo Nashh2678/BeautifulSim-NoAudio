@@ -312,6 +312,14 @@
    "engine_b_4.wav",
    "engine_b_5.wav",
    "engine_b_6.wav"
+  ],
+  "ball_post_ping": [
+   "ball_post_ping_0.ogg",
+   "ball_post_ping_1.ogg",
+   "ball_post_ping_2.ogg",
+   "ball_post_ping_3.ogg",
+   "ball_post_ping_4.ogg",
+   "ball_post_ping_5.ogg"
   ]
  },
  "engine_rates": [

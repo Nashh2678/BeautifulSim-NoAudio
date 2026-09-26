@@ -277,7 +277,8 @@ class FX:
         if len(pts) < 2:
             return
         self._tubes.append((np.asarray([tuple(p.pos) for p in pts], "f4"),
-                            np.asarray([p.time_active for p in pts], "f4"), lifetime, radius,
+                            np.asarray([p.time_active for p in pts], "f4"),
+                            np.asarray([getattr(p, "k", 1.0) for p in pts], "f4"), lifetime, radius,
                             np.asarray(color[:3], "f4"), float(color[3]) if len(color) > 3 else 1.0,
                             white_from, white_len))
 
@@ -286,7 +287,7 @@ class FX:
             return
         cam = np.asarray(cam, "f4")
         out = []
-        for pos, age, life, radius, rgb, a0, w_from, w_len in self._tubes:
+        for pos, age, kpt, life, radius, rgb, a0, w_from, w_len in self._tubes:
             n = len(pos)
             seg = np.empty_like(pos)
             seg[:-1] = pos[1:] - pos[:-1]
@@ -296,7 +297,7 @@ class FX:
             w = 1.0 - np.clip((dist - w_from) / max(w_len, 1e-3), 0.0, 1.0) if w_len > 0 else np.zeros(n, "f4")
             rgba = np.empty((n, 4), "f4")
             rgba[:, 0:3] = rgb[None, :] * (1.0 - w[:, None]) + w[:, None]
-            rgba[:, 3] = a0 * (1.0 - t)
+            rgba[:, 3] = a0 * (1.0 - t) * kpt              # kpt: per-point strength at emission
             view = cam[None, :] - pos
             side = np.cross(seg, view)
             side *= (radius * (1.0 - 0.35 * t) / (np.sqrt((side * side).sum(1)) + 1e-6))[:, None]

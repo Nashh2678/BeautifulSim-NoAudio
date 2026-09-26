@@ -324,7 +324,7 @@ class Audio:
             return
         if self._stream is not None:
             self._stream.stop()
-        self._pg.mixer.stop()
+        self._pg.mixer.fadeout(30)                    # no hard cut (clicks) on focus loss
         for st in self._boost.values():
             if st.get("ch") is not None:
                 self._loop_free.append(st["ch"])
@@ -343,7 +343,8 @@ class _SilentSynth:
 class EngineStream:
     """Streams the synthesized engine (+ the local car's boost loop) to one mixer channel in short
     blocks from a feeder thread, so pitch and level glide continuously with RPM and speed."""
-    BLOCK = 2400                     # 50 ms at 48 kHz; one block queued ahead (margin vs GIL stalls)
+    BLOCK = 3600                     # 75 ms at 48 kHz; one block queued ahead (margin vs GIL stalls)
+    FADE_IN = 480                    # 10 ms fade-in after a dropout: resuming mid-waveform made a deep "tick"
 
     def __init__(self, pygame, channel, sr, synth, model, boost_loop):
         import numpy as np
@@ -379,7 +380,7 @@ class EngineStream:
             self._eng = None
             self._boost = (False, 0.0, 0.0, 0.0)
         try:
-            self.ch.stop()
+            self.ch.fadeout(30)                       # a hard stop mid-waveform clicks
         except Exception:
             pass
 
@@ -424,6 +425,8 @@ class EngineStream:
             try:
                 if self.ch.get_queue() is None:
                     out = self.render_block(self.BLOCK, eng, boost)
+                    if not self.ch.get_busy():                # the channel ran dry (feeder starved): fade in
+                        out[:self.FADE_IN] *= np.linspace(0.0, 1.0, self.FADE_IN, dtype="f4")[:, None]
                     snd = self.pg.sndarray.make_sound(
                         np.ascontiguousarray((np.clip(out, -1.0, 1.0) * 32767.0).astype("<i2")))
                     if self.ch.get_busy():

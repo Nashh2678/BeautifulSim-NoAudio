@@ -762,6 +762,9 @@ class OfflineRenderer:
         r.ball_trail = RibbonEmitter()
         r._ball_trail_on = False
         r._goal_banner = None
+        r._flip_until = {}
+        r._corner_ribs = {}
+        r._trail_fast_t = -1e9
         r.fx = rl_fx.FX(self.ctx)
         r.wheel_rig.cars.clear()
         r._pad_prev = None
