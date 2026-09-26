@@ -17,7 +17,7 @@ import time
 import numpy as np
 import moderngl
 
-from rl_shaders import PARTICLE_VERT, PARTICLE_FRAG, RING_VERT, RING_FRAG
+from rl_shaders import PARTICLE_VERT, PARTICLE_FRAG, RING_VERT, RING_FRAG, TUBE_VERT, TUBE_FRAG
 
 # Flip-reset indicator (RL): a disc in the car's wheel plane whose DIAMETER is the car's length, centred
 # under the middle of the car, 120 ms linear fade. (Octane: ~118 uu long; wheel midpoint ~9 uu ahead of
@@ -217,6 +217,10 @@ class FX:
         self.trail_vao = ctx.vertex_array(self.trail_prog, [(self.trail_vbo, "3f 4f", "in_pos", "in_col")])
         self._pad_glow = None
         self._trails = []
+        self._tubes = []
+        self.tube_prog = ctx.program(vertex_shader=TUBE_VERT, fragment_shader=TUBE_FRAG)
+        self.tube_vbo = ctx.buffer(reserve=4096 * 8 * 4, dynamic=True)
+        self.tube_vao = ctx.vertex_array(self.tube_prog, [(self.tube_vbo, "3f 4f 1f", "in_pos", "in_col", "in_u")])
         self._beams = []
         self.flame_prog = ctx.program(vertex_shader=FLAME_VERT, fragment_shader=FLAME_FRAG)
         fm = _flame_mesh()
@@ -265,6 +269,52 @@ class FX:
         pos = np.asarray([tuple(p.pos) for p in pts], "f4")
         age = np.asarray([p.time_active for p in pts], "f4")
         self._trails.append((pos, age, lifetime, width, color, None if up is None else np.asarray(up, "f4")))
+
+    def add_tube(self, ribbon, lifetime, radius, color, white_from=0.0, white_len=0.0):
+        """Queue a RibbonEmitter (newest point first) as a round, shaded tube that fades with age. The first
+        `white_len` uu after `white_from` (measured along the trail from its head) blend from white to `color`."""
+        pts = [p for p in ribbon.points if p.connected]
+        if len(pts) < 2:
+            return
+        self._tubes.append((np.asarray([tuple(p.pos) for p in pts], "f4"),
+                            np.asarray([p.time_active for p in pts], "f4"), lifetime, radius,
+                            np.asarray(color[:3], "f4"), float(color[3]) if len(color) > 3 else 1.0,
+                            white_from, white_len))
+
+    def _render_tubes(self, m_vp_bytes, cam):
+        if not self._tubes:
+            return
+        cam = np.asarray(cam, "f4")
+        out = []
+        for pos, age, life, radius, rgb, a0, w_from, w_len in self._tubes:
+            n = len(pos)
+            seg = np.empty_like(pos)
+            seg[:-1] = pos[1:] - pos[:-1]
+            seg[-1] = seg[-2]
+            dist = np.concatenate([[0.0], np.cumsum(np.sqrt((seg[:-1] ** 2).sum(1)))]).astype("f4")
+            t = np.clip(age / life, 0.0, 1.0)
+            w = 1.0 - np.clip((dist - w_from) / max(w_len, 1e-3), 0.0, 1.0) if w_len > 0 else np.zeros(n, "f4")
+            rgba = np.empty((n, 4), "f4")
+            rgba[:, 0:3] = rgb[None, :] * (1.0 - w[:, None]) + w[:, None]
+            rgba[:, 3] = a0 * (1.0 - t)
+            view = cam[None, :] - pos
+            side = np.cross(seg, view)
+            side *= (radius * (1.0 - 0.35 * t) / (np.sqrt((side * side).sum(1)) + 1e-6))[:, None]
+            v = np.empty((2 * n, 8), "f4")
+            v[0::2, 0:3] = pos - side; v[1::2, 0:3] = pos + side
+            v[0::2, 3:7] = rgba; v[1::2, 3:7] = rgba
+            v[0::2, 7] = -1.0; v[1::2, 7] = 1.0
+            if out:                                  # degenerate bridge between tubes
+                out.append(out[-1][-1:]); out.append(v[:1])
+            out.append(v)
+        self._tubes = []
+        data = np.concatenate(out, 0)[:4096]
+        self.tube_vbo.write(data.tobytes())
+        self.tube_prog["m_vp"].write(m_vp_bytes)
+        self.ctx.blend_func = moderngl.ONE, moderngl.ONE_MINUS_SRC_ALPHA
+        self.ctx.disable(moderngl.CULL_FACE)
+        self.tube_vao.render(moderngl.TRIANGLE_STRIP, vertices=len(data))
+        self.ctx.enable(moderngl.CULL_FACE)
 
     def add_beam(self, p0, p1, w0, w1, c0, c1, mid=None):
         """Camera-facing tapered quad strip p0 -> (mid) -> p1 with per-end width/colour (flames)."""
@@ -588,6 +638,7 @@ class FX:
         ctx.enable(moderngl.BLEND)
         ctx.fbo.depth_mask = False                     # particles test depth but never write it
         self._render_trails(m_vp_bytes, cam_pos)
+        self._render_tubes(m_vp_bytes, cam_pos)
         self._render_flames(m_vp_bytes, cam_pos)
         if self.alpha.n or self.add.n or self._pad_glow is not None:
             self.prog["m_vp"].write(m_vp_bytes)

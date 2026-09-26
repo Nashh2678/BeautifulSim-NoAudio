@@ -264,6 +264,79 @@ class RSVRenderer:
         tex.build_mipmaps()
         return tex, (cell_w, cell_h, metrics)
 
+    GOAL_BANNER_S = 3.0          # on screen after a goal (longer while a goal celebration hides the ball)
+
+    def _banner_textures(self, team):
+        """'BLUE SCORED!' / 'ORANGE SCORED!' rendered once: a crisp text mask + a blurred glow mask."""
+        tex = self._banner_tex.get(team)
+        if tex is not None:
+            return tex
+        from PIL import Image, ImageDraw, ImageFont, ImageFilter
+        text = ("BLUE" if team == 0 else "ORANGE") + " SCORED!"
+        fonts = os.path.join(os.environ.get("WINDIR", "C:/Windows"), "Fonts")
+        font = None
+        for fn in ("bahnschrift.ttf", "segoeuil.ttf", "segoeui.ttf", "arial.ttf"):
+            try:
+                font = ImageFont.truetype(os.path.join(fonts, fn), 150)
+                try:
+                    font.set_variation_by_name("SemiLight")      # thin strokes, like RL's goal text
+                except Exception:
+                    pass
+                break
+            except OSError:
+                continue
+        if font is None:
+            font = ImageFont.load_default()
+        pad = 60
+        bb = ImageDraw.Draw(Image.new("L", (8, 8))).textbbox((0, 0), text, font=font)
+        w, h = bb[2] - bb[0] + 2 * pad, bb[3] - bb[1] + 2 * pad
+        core = Image.new("L", (w, h), 0)
+        ImageDraw.Draw(core).text((pad - bb[0], pad - bb[1]), text, fill=255, font=font)
+        glow = core.filter(ImageFilter.MaxFilter(7)).filter(ImageFilter.GaussianBlur(14))
+        out = []
+        for im in (core, glow):
+            im = im.transpose(Image.FLIP_TOP_BOTTOM)
+            t = self.ctx.texture(im.size, 1, im.tobytes())
+            t.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+            t.build_mipmaps()
+            out.append(t)
+        tex = self._banner_tex[team] = (out[0], out[1], w / float(h), (bb[3] - bb[1]) / float(h))
+        return tex
+
+    def render_goal_banner(self, width, height, state):
+        """RL's goal text: golden 'BLUE SCORED!' / 'ORANGE SCORED!' with a warm glow, pops in, holds, fades."""
+        if self._goal_banner is None:
+            return
+        team, t0 = self._goal_banner
+        age = time.time() - t0
+        cel = getattr(state, "celebration_pos", None) is not None or getattr(state, "ball_hidden", False)
+        end = self.GOAL_BANNER_S if not cel else max(self.GOAL_BANNER_S, age + 0.35)
+        if age > end:
+            self._goal_banner = None
+            return
+        a = min(1.0, age / 0.18) * min(1.0, max(0.0, (end - age) / 0.35))
+        scale = 1.0 + 0.18 * (1.0 - min(1.0, age / 0.22)) ** 2       # quick settle from 118%
+        core, glow, aspect, glyph_frac = self._banner_textures(team)
+        text_h = height * 0.075 * scale                               # cap height ~7.5% of the screen
+        qh = text_h / glyph_frac
+        qw = qh * aspect
+        cx, cy = width * 0.5, height * 0.30
+        x0, x1, y0, y1 = cx - qw / 2, cx + qw / 2, cy - qh / 2, cy + qh / 2
+        arr = np.asarray([(x0, y0, 0.0, 1.0), (x1, y0, 1.0, 1.0), (x1, y1, 1.0, 0.0),
+                          (x0, y0, 0.0, 1.0), (x1, y1, 1.0, 0.0), (x0, y1, 0.0, 0.0)], "f4")
+        ortho = Matrix44.orthogonal_projection(0.0, width, height, 0.0, -1.0, 1.0)
+        self.text_vbo.write(arr.tobytes())
+        self.prog_text["m_vp"].write(ortho.astype("f4"))
+        self.prog_text["Tex"].value = 0
+        self.render_target.use()
+        self.ctx.enable(moderngl.BLEND)
+        self.ctx.blend_func = moderngl.ONE, moderngl.ONE_MINUS_SRC_ALPHA
+        for tex, rgba in ((glow, (1.0, 0.55, 0.12, 0.55 * a)), (core, (1.0, 0.80, 0.36, a))):
+            tex.use(location=0)
+            self.prog_text["color"].value = rgba
+            self.text_vao.render(moderngl.TRIANGLES, vertices=6)
+        self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
+
     def _draw_number(self, text, cx, cy, height, rgba):
         cell_w, cell_h, widths = self._digit_metrics
         scale = height / cell_h
@@ -349,6 +422,10 @@ class RSVRenderer:
         ##########################################
 
         self.ball_ribbon = RibbonEmitter()
+        self.ball_trail = RibbonEmitter()      # RL ball trail (last-touch team colour, fast ball only)
+        self._ball_trail_on = False
+        self._goal_banner = None               # (scoring team, time) -> "BLUE SCORED!" / "ORANGE SCORED!"
+        self._banner_tex = {}
         self.car_ribbons = []
 
         print("Data path:", DATA_DIR_PATH)
@@ -1877,6 +1954,7 @@ class RSVRenderer:
         self.render_target.use()
         if not getattr(state, "ball_hidden", False):          # out of play during a goal celebration
             self.ball_vao.render(moderngl.TRIANGLES)
+        self._update_ball_trail(state, ball_phys, ball_pos, interp_ratio, delta_time)
         if state.gamemode == "heatseeker":
             ball_speed = ball_phys.get_vel(interp_ratio).length
             self.ball_ribbon.update(ball_speed > 600, 0, ball_pos, Vector3((100, 0, 0)), 0.8, delta_time)
@@ -2076,6 +2154,31 @@ class RSVRenderer:
         gates[key] = (now, strength)
         return True
 
+    # RL ball trail: a ribbon following the ball centre in the colour of the team that touched it last, only
+    # while the ball moves faster than 100 kph; a round tube, each point fading out over 600 ms, white for the
+    # first 50 uu past the ball's surface.
+    BALL_TRAIL_SPEED = 100.0 / 0.036                          # 100 kph in uu/s (1 uu = 1 cm)
+    BALL_TRAIL_LIFE = 0.60
+    TEAM_TRAIL = ((0.30, 0.45, 1.0), (1.0, 0.52, 0.12))
+
+    def _update_ball_trail(self, state, ball_phys, ball_pos, interp_ratio, delta_time):
+        team = rl_events.g_detector.last_touch_team
+        hidden = getattr(state, "ball_hidden", False)
+        on = (not hidden and team is not None and state.gamemode != "heatseeker"
+              and ball_phys.get_vel(interp_ratio).length > self.BALL_TRAIL_SPEED)
+        if on and not self._ball_trail_on and self.ball_trail.points:
+            self.ball_trail.points.clear()                     # restart: never bridge across the gap
+        self._ball_trail_on = on
+        self.ball_trail.update(on, 0, Vector3(ball_pos), Vector3((0.0, 0.0, 0.0)), self.BALL_TRAIL_LIFE, delta_time)
+        if hidden or ball_phys.is_teleporting():
+            self.ball_trail.points.clear()
+        if len(self.ball_trail.points) > 1 and team is not None:
+            self._trail_team = int(team) & 1
+        if len(self.ball_trail.points) > 1:
+            self.fx.add_tube(self.ball_trail, self.BALL_TRAIL_LIFE, 28.0,
+                             (*self.TEAM_TRAIL[getattr(self, "_trail_team", 0)], 0.9),
+                             white_from=91.25, white_len=50.0)
+
     def _handle_event(self, ev, spectated):
         a = self.audio
         k = ev["kind"]
@@ -2141,6 +2244,7 @@ class RSVRenderer:
             if local:                                  # RL only plays pickups for your own car
                 a.play("pad_pickup", pos, 0.9, True)
         elif k == "goal":
+            self._goal_banner = (int(ev.get("team", 0)) & 1, time.time())
             a.play("goal_explosion_default", pos, 1.0, True)
             a.play("goal_explosion", pos, 0.8, True)             # the goal event layer on top
             a.play("goal_horn", None, 0.8, True)
@@ -2163,6 +2267,7 @@ class RSVRenderer:
         self.render_supersonic_streaks(width, height, ss_target, total_time)
         self.render_pai_hud(width, height, getattr(state_manager, "gail_hud", None))
         self.render_scoreboard_hud(width, height, getattr(state_manager, "scoreboard", None))
+        self.render_goal_banner(width, height, state)
 
         v = self.config.volume.val / 100.0          # settings-panel volume slider drives the mixer
         for name in self.config.SOUND_MIX:          # per-category sliders
@@ -2289,6 +2394,27 @@ class RSVRenderer:
                 self.spectate_idx = closest_idx
 
 
+def _is_foreground(window):
+    """True only if the vis really is the OS foreground window. Qt's isActiveWindow() can already be True for a
+    window Windows refused to bring forward (launched from the GUI: focus-stealing protection), which made the
+    vis render + play sound + un-pause the feed behind the GUI at startup."""
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+        u32 = ctypes.windll.user32
+        u32.GetForegroundWindow.restype = ctypes.c_void_p
+        u32.GetAncestor.restype = ctypes.c_void_p
+        u32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        fg = u32.GetForegroundWindow()
+        if not fg:
+            return False
+        hwnd = int(window.winId())
+        return fg == hwnd or u32.GetAncestor(fg, 3) == hwnd       # 3 = GA_ROOTOWNER (popups, dialogs)
+    except Exception:
+        return True
+
+
 def set_swap_interval(n):
     """VSync on/off at runtime on the CURRENT GL context (WGL_EXT_swap_control). -> success."""
     try:
@@ -2411,7 +2537,7 @@ def main():
         # click-away. While unfocused the window simply holds its last frame (it does NOT close).
         active = False
         try:
-            active = window.isActiveWindow() and not window.isMinimized()
+            active = window.isActiveWindow() and not window.isMinimized() and _is_foreground(window)
             # Suspend BEFORE repainting stops: Qt still repaints once on focus loss, which used to
             # restart the boost loop with no later frame to stop it.
             gl_widget.renderer.audio.set_active(active)

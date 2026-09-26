@@ -213,19 +213,55 @@ void main() {
             // gentle per-metre value noise so even the averaged far field isn't perfectly flat
             col *= 0.95 + 0.10 * vnoise(q / 40.0);
             col = mix(col, col * (0.80 + 0.4 * teamCol), 0.05 + 0.05 * endness);
-            // ---- markings (RL style): halfway line, centre circle + dot, rounded team goal box ----
-            float w = 13.0;
-            float white = 0.0;
-            white = max(white, aline(q.y, w));
-            white = max(white, aline(length(q) - 950.0, w));
-            white = max(white, 1.0 - smoothstep(34.0, 38.0 + fwidth(length(q)), length(q)));
-            float box = sdRoundBox(vec2(q.x, abs(q.y) - 4560.0), vec2(1750.0, 560.0), 380.0);
-            float teamLine = aline(box, w * 1.3);
-            float boxFill = (1.0 - smoothstep(-2.0, 2.0, box)) * 0.10;
-            col = mix(col, vec3(0.82, 0.85, 0.82), white * 0.85);
-            col = mix(col, teamCol * 0.9 + 0.1, teamLine * 0.9);
-            col = mix(col, col * (0.7 + 0.6 * teamCol), boxFill);
-            emis += teamCol * teamLine * 0.25;
+            // ---- markings (RL "Champions Field" style), each half in its team colour. Distances along the
+            //      field: ay = |y| from the halfway line, g = 5120 - |y| from the goal line. Chevrons are the
+            //      level lines of g + |x| (pointing to midfield) or ay +/- |x| (centre ring / centre disc). ----
+            // deep "paint" team colours (the lighter blueCol / orangeCol are for glows and trims)
+            const vec3 PAINT_B = vec3(0.012, 0.10, 0.78), PAINT_O = vec3(0.82, 0.16, 0.02);
+            vec3 tc = q.y < 0.0 ? PAINT_B : PAINT_O;
+            float ax = abs(q.x), ay = abs(q.y), g = 5120.0 - ay, r = length(q);
+            float fill = 0.0, dark = 0.0, white = 0.0, zone = 0.0;
+            // 1) solid box in front of the goal (640 deep, +-1500) with dark ">" chevrons
+            float boxD = max(max(-g, g - 640.0), ax - 1500.0);
+            float inBox = 1.0 - smoothstep(-1.0, 1.0 + fwidth(boxD), boxD);
+            fill = max(fill, inBox);
+            dark = max(dark, inBox * aline((fract((g + ax) / 380.0) - 0.5) * 380.0, 9.0));
+            // 2) striped zone (goal line -> 1770 out, +-2900): thick chevron bands, thin outline
+            float zD = max(max(-g, g - 1770.0), ax - 2900.0);
+            float inZone = 1.0 - smoothstep(-1.0, 1.0 + fwidth(zD), zD);
+            float bands = aline((fract((g + ax) / 640.0) - 0.5) * 640.0, 150.0);
+            fill = max(fill, inZone * bands);
+            zone = max(zone, inZone);
+            white = max(white, 0.45 * aline(zD, 7.0));
+            // 3) the big "D" arc closing the zone toward midfield (circle centred 11510 behind the goal line)
+            float arc = length(vec2(q.x, 11510.0 - ay)) - 8660.0;
+            white = max(white, aline(arc, 12.0) * step(ax, 2900.0) * step(ay, 3360.0));
+            // 4) thin lengthwise team lanes + two white dashed lines
+            float lane = 0.0;
+            lane = max(lane, (aline(ax - 3000.0, 9.0) + aline(ax - 2000.0, 9.0)) * step(ay, 3350.0));
+            lane = max(lane, aline(ax - 1000.0, 9.0) * step(1090.0, ay) * step(ay, 2935.0));
+            lane = max(lane, aline(q.x, 9.0) * step(1330.0, ay) * step(ay, 2750.0));
+            fill = max(fill, min(lane, 1.0) * 0.9);
+            white = max(white, 0.6 * aline(ax - 1130.0, 7.0) * step(1000.0, ay) * step(ay, 3100.0)
+                                  * step(fract(ay / 220.0), 0.55));
+            // 5) centre: split solid disc (dark ">" lines pointing to the centre line), ring of outward
+            //    chevron stripes, white circle, halfway line, centre spot
+            float disc = 1.0 - smoothstep(580.0 - fwidth(r), 580.0 + fwidth(r), r);
+            fill = max(fill, disc);
+            dark = max(dark, disc * aline((fract((ay - ax) / 300.0) - 0.5) * 300.0, 8.0));
+            float ring = smoothstep(630.0, 640.0, r) * (1.0 - smoothstep(1020.0, 1030.0, r));
+            fill = max(fill, ring * aline((fract((ay + ax) / 320.0) - 0.5) * 320.0, 55.0));
+            zone = max(zone, (1.0 - smoothstep(1070.0, 1080.0, r)) * 0.7);
+            white = max(white, aline(r - 1080.0, 11.0));
+            white = max(white, aline(q.y, 11.0));
+            white = max(white, 1.0 - smoothstep(34.0, 38.0 + fwidth(r), r));
+            dark = max(dark, aline(q.y, 22.0) * disc);              // thin dark split between the half discs
+            // paint: zones sit on slightly darker turf, team colour over it, dark chevrons over solid fills
+            col *= 1.0 - 0.18 * zone;
+            col = mix(col, tc, fill * 0.92);
+            col = mix(col, col * 0.25, dark * fill);
+            col = mix(col, vec3(0.80, 0.83, 0.80), white * 0.8);
+            emis += tc * fill * (1.0 - dark) * 0.12;
             spec = 0.03;
         }
     } else if (inGoal) {
@@ -236,9 +272,12 @@ void main() {
         alpha = 0.10 + 0.55 * g;
         emis += teamCol * 0.45 * g;
     } else if (ramp) {
-        // padded ramp: dark panels and a white base line
-        col = vec3(0.045, 0.05, 0.06) * (0.85 + 0.15 * step(0.5, fract(p.z / 55.0)));
-        emis += vec3(0.85) * 0.35 * aline(p.z - 4.0, 4.0);
+        // floor->wall curve in the colour of the team whose half it is (switches at the halfway line),
+        // brighter toward its top edge, with a glowing rim like RL's arena boards
+        vec3 rc = mix(vec3(0.012, 0.10, 0.78), vec3(0.82, 0.16, 0.02), smoothstep(-30.0, 30.0, p.y));
+        float h = clamp(p.z / 250.0, 0.0, 1.0);
+        col = rc * (0.55 + 0.35 * h) * (0.92 + 0.08 * step(0.5, fract(p.z / 55.0)));
+        emis += rc * (0.10 + 0.25 * h) + mix(rc, vec3(1.0), 0.35) * 0.8 * aline(p.z - 244.0, 5.0);
         spec = 0.15;
     } else {
         // ---- translucent glass walls / ceiling with hex panels ----
@@ -460,12 +499,13 @@ void main() {
     c += ballEmis;
 
     // ---- goal line: ONLY once the ball centre is inside the goal mouth and touching the line:
-    // the part of the ball past the line goes black, white seam at the line (RL's goal-line cue) ----
+    // the part of the ball past the line goes very dark (its own skin at ~5% light, texture still readable),
+    // white seam at the line (RL's goal-line cue) ----
     if (inGoal > 0.5) {
         float dy = abs(v_pos.y) - 5124.25;
         float lw = max(fwidth(dy), 0.01) * 1.5;
         float past = smoothstep(-lw, lw, dy);
-        c = mix(c, vec3(0.006), past);
+        c = mix(c, c * 0.05, past);
         c += vec3(1.0) * (1.0 - smoothstep(0.0, 2.2 + lw, abs(dy))) * 1.3;
     }
     f_color = vec4(to_srgb(c), 1.0);
@@ -572,6 +612,31 @@ void main() {
     if (r2 > 1.0) discard;
     float a = v_col.a * (1.0 - r2) * (1.0 - r2);
     f_color = vec4(v_col.rgb * a, a);      // premultiplied: works for additive (ONE,ONE) and over
+}
+'''
+
+# Ball trail: a camera-facing strip shaded as a round tube (v_u = -1..1 across it -> cylinder profile).
+TUBE_VERT = '''
+#version 330
+uniform mat4 m_vp;
+in vec3 in_pos;
+in vec4 in_col;
+in float in_u;
+out vec4 v_col;
+out float v_u;
+void main() { v_col = in_col; v_u = in_u; gl_Position = m_vp * vec4(in_pos, 1.0); }
+'''
+
+TUBE_FRAG = '''
+#version 330
+in vec4 v_col;
+in float v_u;
+out vec4 f_color;
+void main() {
+    float s = sqrt(max(1.0 - v_u * v_u, 0.0));                 // cross-section: 1 at the axis, 0 at the rim
+    vec3 c = v_col.rgb * (0.45 + 0.65 * s) + vec3(1.0) * pow(s, 6.0) * 0.28;   // lit core + soft highlight
+    float a = v_col.a * smoothstep(0.0, 0.45, s);
+    f_color = vec4(c * a, a);
 }
 '''
 

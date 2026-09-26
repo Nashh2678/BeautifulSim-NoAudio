@@ -283,6 +283,7 @@ class EventDetector:
         self._pair_cool = {}
         self._reset_cool = {}
         self._body_cool = {}
+        self.last_touch_team = None     # team of the last car to touch the ball (ball trail colour)
         self._goal_cool_until = 0.0
 
     def reset(self):
@@ -319,6 +320,7 @@ class EventDetector:
         ball_tp = _len(_sub(bpos, pb[0])) > TELEPORT
         car_tp = [(_len(_sub(c.pos, p.pos)) > TELEPORT) for c, p in zip(cars, pc)]
         if ball_tp or (cars and sum(car_tp) * 2 >= len(cars)):
+            self.last_touch_team = None                     # kickoff / reset: nobody has touched it yet
             return                                          # episode reset / state-set: no events
 
         # ---- ball ----
@@ -333,6 +335,7 @@ class EventDetector:
                 touchers = [min(near, key=lambda x: x[1])[0]]
         if touchers:
             i = touchers[0]
+            self.last_touch_team = cars[i].team
             self._emit(t, "ball_hit", bpos, car=i, team=cars[i].team, strength=dvb_mag)
         elif dvb_mag > 300.0:
             if swept_goal_frame_distance(pb[0], bpos) < POST_CONTACT:

@@ -75,12 +75,16 @@ there are git-ignored, so they never get committed by accident.
 
 ## Features
 
-- **Arena**: see-through hexagon walls and ceiling, grass pitch with field markings and team-coloured goal boxes,
-  translucent team nets, soft shadows, a low-poly valley with mountains, trees and a lake under an evening sky.
-- **Cars and ball**: team-painted cars, a two-seam ball, boost pads that fade back in while recharging.
+- **Arena**: see-through hexagon walls and ceiling, a grass pitch with Rocket League-style team markings (striped
+  zones in front of each goal, split centre circle, team lanes), team-coloured floor-to-wall curves, translucent team
+  nets, soft shadows, a low-poly valley with mountains, trees and a lake under an evening sky.
+- **Cars and ball**: team-painted cars, a two-seam ball that darkens as it crosses the goal line, boost pads that
+  fade back in while recharging.
+- **Ball trail**: like Rocket League, a round tube in the colour of the last team to touch the ball, shown above
+  100 kph, white right behind the ball and fading out over 600 ms.
 - **Effects**: boost flames, supersonic trails, jump flashes, demolition explosions, goal bursts, boost pad
-  pickups, a boost gauge, and a Rocket League-style flip-reset indicator (a white disc under the car's wheels,
-  as long as the car, for 120 ms).
+  pickups, a boost gauge, a Rocket League-style flip-reset indicator (a white disc under the car's wheels,
+  as long as the car, for 120 ms), and golden "BLUE SCORED!" / "ORANGE SCORED!" text on goals.
 - **Game events** reconstructed from the state stream: jumps, double jumps, flips (including wall dashes),
   flip resets (only when the reset is really taken on the ball), ball touches, bounces (floor, walls, posts
   and crossbar), car body impacts, bumps, demos and goals.
@@ -92,5 +96,6 @@ there are git-ignored, so they never get committed by accident.
 ## Credits
 
 - [ZealanL](https://github.com/ZealanL): [RocketSimVis](https://github.com/ZealanL/RocketSimVis), the visualizer this is built on,
-  including its car, arena and boost pad models; and [RocketSim](https://github.com/ZealanL/RocketSim).
+  and [RocketSim](https://github.com/ZealanL/RocketSim). The car, arena and boost pad models are his, used under his
+  terms: free to use for anything as long as he is credited. If you reuse them, credit him too.
 - Rocket League is a trademark of Psyonix. This project is not affiliated with or endorsed by Psyonix or Epic Games.
