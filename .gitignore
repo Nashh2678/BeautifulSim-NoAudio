@@ -23,7 +23,6 @@ x64/
 Release/
 Debug
 out/
-*.obj
 *.lib
 *.exe
 *.pdb
@@ -47,5 +46,22 @@ out/
 packages.config
 CMakeSettings.json
 
+# Python cache
+__pycache__
+
+# IntelliJ/PyCharm cache
+.idea
+
 # Anything starting with three underscores
 ___*
+# RocketSimVis local/user state and generated caches
+src/rsv_settings.json
+src/rsv_crash.txt
+src/*.bak
+data/landscape_cache.npy
+
+# decoded sound bank for clip rendering (auto-built on first clip)
+data/sounds_cache/
+src/rsv_events.log
+# rendered clips + their logs
+clips/

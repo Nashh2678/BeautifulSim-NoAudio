@@ -1,0 +1,9 @@
+# Python 3.10+ (tested on 3.11, Windows)
+moderngl>=5.8,<6
+moderngl-window>=2.4
+PyOpenGL
+pyrr
+numpy<2
+pywavefront
+pyqt5
+Pillow
