@@ -20,12 +20,12 @@ import moderngl
 from rl_shaders import PARTICLE_VERT, PARTICLE_FRAG, RING_VERT, RING_FRAG
 
 # Flip-reset indicator (RL): a disc in the car's wheel plane whose DIAMETER is the car's length, centred
-# under the middle of the car, 200 ms linear fade. (Octane: ~118 uu long; wheel midpoint ~9 uu ahead of
+# under the middle of the car, 120 ms linear fade. (Octane: ~118 uu long; wheel midpoint ~9 uu ahead of
 # the origin; wheel contact plane 17 uu below it -- 14 keeps it just off the ball it sits on.)
 RESET_DISC_RADIUS = 59.0
 RESET_DISC_FWD = 9.0
 RESET_DISC_BELOW = 14.0
-RESET_DISC_LIFE = 0.20
+RESET_DISC_LIFE = 0.12
 
 TRAIL_VERT = """
 #version 330
@@ -389,7 +389,7 @@ class FX:
             right = np.cross(up, fwd).astype("f4")
             center = pos + fwd * RESET_DISC_FWD - up * RESET_DISC_BELOW
             d["drawn"] += 1
-            k = 1.0 - min(d["age"] / RESET_DISC_LIFE, 1.0)          # linear fade over 200 ms
+            k = 1.0 - min(d["age"] / RESET_DISC_LIFE, 1.0)          # linear fade over RESET_DISC_LIFE
             rp["center"].write(center.astype("f4").tobytes())
             rp["axisU"].write(fwd.astype("f4").tobytes())
             rp["axisV"].write(right.tobytes())
@@ -407,7 +407,7 @@ class FX:
             nrm = np.asarray(ev.get("normal", ev.get("up", (0, 0, 1))), "f4")
             # a crisp white frosted circle at full size from the first frame, then a linear fade: 200 ms total
             # RL's indicator: a white disc in the car's wheel plane, as long as the car, that stays under
-            # the car (follows it) for 200 ms -- drawn in render() from the car's current pose.
+            # the car (follows it) for 120 ms -- drawn in render() from the car's current pose.
             car = ev.get("car", -1)
             if car is not None and car >= 0:
                 self.reset_discs = [d for d in self.reset_discs if d["car"] != car]
