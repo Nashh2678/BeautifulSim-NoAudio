@@ -62,14 +62,15 @@ class Audio:
     MIN_GAIN = 0.18          # far sounds never fully vanish (RL's arena is small and reverberant)
 
     # sound name prefix -> mixer category (Settings > Audio sliders); anything else = master only
-    CATEGORIES = (("ball_", "ball"), ("bump", "demo"), ("body", "demo"), ("demo", "demo"), ("boost", "boost"),
+    CATEGORIES = (("ball_post", "post"), ("ball_", "ball"), ("bump", "impact"), ("body", "impact"), ("demo", "demo"), ("boost", "boost"),
                   ("pad_pickup", "boost"), ("engine", "engine"), ("supersonic", "engine"),
                   ("flipreset", "reset"), ("jump", "flips"), ("doublejump", "flips"), ("dodge", "flips"),
                   ("land", "flips"))
 
     def __init__(self):
         self.ok = False
-        self.cat = {"ball": 1.0, "demo": 1.0, "boost": 1.0, "engine": 1.0, "flips": 1.0, "reset": 1.0}
+        self.cat = {"ball": 1.0, "post": 1.0, "demo": 1.0, "impact": 1.0, "boost": 1.0, "engine": 1.0, "flips": 1.0,
+                    "reset": 1.0}
         self._cat_cache = {}
         self.sounds = {}                  # name -> [pygame.mixer.Sound]
         self._last_pick = {}

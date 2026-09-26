@@ -322,7 +322,8 @@ class OfflineAudio(rl_audio.Audio):
         # deliberately not calling Audio.__init__ (it would start pygame)
         self.clock = clock
         self.export_volume = export_volume
-        self.cat = {"ball": 1.0, "demo": 1.0, "boost": 1.0, "engine": 1.0, "flips": 1.0, "reset": 1.0}
+        self.cat = {"ball": 1.0, "post": 1.0, "demo": 1.0, "impact": 1.0, "boost": 1.0, "engine": 1.0, "flips": 1.0,
+                    "reset": 1.0}
         self._cat_cache = {}
         self._last_pick = {}
         self.listener = None

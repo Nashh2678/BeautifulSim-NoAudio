@@ -468,7 +468,7 @@ class EventDetector:
                     continue
                 dva_v, dvb_v = _sub(ca.vel, pa.vel), _sub(cb.vel, pbb.vel)
                 dva, dvb2 = _len(dva_v), _len(dvb_v)
-                if max(dva, dvb2) < 260.0:
+                if max(dva, dvb2) < 150.0:      # a light push is ~170; a car's own braking is <= ~120
                     continue
                 if _dot(_sub(dva_v, dvb_v), sep) <= 0.0:       # a real contact pushes them apart
                     continue

@@ -36,7 +36,9 @@ class Config:
     # per-category sound volumes (percent, on top of the master volume)
     SOUND_MIX = {
         "vol_ball": "Ball touches",
-        "vol_demo": "Demos / bumps",
+        "vol_demo": "Demos",
+        "vol_impact": "Body impacts / bumps",
+        "vol_post": "Goal posts / crossbar",
         "vol_boost": "Boost",
         "vol_engine": "Car engine",
         "vol_flips": "Flips / jumps",
