@@ -754,7 +754,7 @@ class OfflineRenderer:
         r._boost_last = {}
         r._cel_w = 0.0
         r._cel_last = None
-        for a in ("_last_hit_snd", "_ball_in_goal", "_kickoff_pick_done"):
+        for a in ("_snd_gates", "_ball_in_goal", "_kickoff_pick_done"):
             if hasattr(r, a):
                 delattr(r, a)
         self.audio.reset()

@@ -2060,6 +2060,22 @@ class RSVRenderer:
             except Exception as e:
                 print("[events] handler error: {!r}".format(e))
 
+    # Impact sounds (like RL): too-soft contacts are skipped, and the same sound repeating within its window only
+    # plays again if clearly harder than the last one -- so a ball rubbing a post, a car grinding a wall or two
+    # cars pushing each other don't machine-gun the sound. key -> (min strength, window s).
+    SOUND_GATES = {"ball_hit": (130.0, 0.15), "post": (350.0, 0.50), "bounce": (300.0, 0.20),
+                   "bump": (150.0, 0.40), "body": (300.0, 0.40), "land": (140.0, 0.25)}
+
+    def _sound_gate(self, kind, key, strength, harder=1.6):
+        min_s, window = self.SOUND_GATES[kind]
+        now = time.time()
+        gates = self.__dict__.setdefault("_snd_gates", {})
+        last_t, last_s = gates.get(key, (-1e9, 0.0))
+        if strength < min_s or (now - last_t < window and strength < last_s * harder):
+            return False
+        gates[key] = (now, strength)
+        return True
+
     def _handle_event(self, ev, spectated):
         a = self.audio
         k = ev["kind"]
@@ -2075,17 +2091,15 @@ class RSVRenderer:
             a.play("flipreset" + sfx, pos, 1.0 if local else 0.85, local)
             self.fx.on_event(ev, spectated)
         elif k == "land":
+            if not self._sound_gate("land", ("land", car), ev.get("strength", 0.0)):
+                return
             g = min(1.0, max(0.25, (ev.get("strength", 0.0) - 140.0) / 900.0))
             a.play("land" + sfx, pos, g, local)
         elif k == "ball_hit":
             # RL doesn't re-trigger the hit sound on every tiny dribble contact: soft touches are
             # skipped, and hits closer than 0.15 s play only if clearly harder than the last one.
-            s_ = ev.get("strength", 0.0)
-            now_h = time.time()
-            last_t, last_s = getattr(self, "_last_hit_snd", (0.0, 0.0))
-            if s_ < 130.0 or (now_h - last_t < 0.15 and s_ < last_s * 1.6):
+            if not self._sound_gate("ball_hit", "ball_hit", ev.get("strength", 0.0)):
                 return
-            self._last_hit_snd = (now_h, s_)
             d = a.distance(pos)
             band = "close" if d < 1500 else ("mid" if d < 4000 else "far")
             g = min(1.0, 0.45 + ev.get("strength", 0.0) / 2500.0)
@@ -2093,16 +2107,24 @@ class RSVRenderer:
         elif k == "ball_bounce":
             d = a.distance(pos)
             band = "close" if d < 1500 else ("mid" if d < 4000 else "far")
-            g = min(1.0, max(0.15, ev.get("strength", 0.0) / 1800.0))
+            s_ = ev.get("strength", 0.0)
             surf = ev.get("surface")
             kind = "floor" if surf == "floor" else ("post" if surf == "post" else "wall")
-            name = "ball_post_{}".format(band) if kind == "post" else "ball_bounce_{}_{}".format(kind, band)
-            a.play(name, pos, 1.0 if kind == "post" else g)
+            if kind == "post":
+                if not self._sound_gate("post", "post", s_):
+                    return
+                a.play("ball_post_{}".format(band), pos, min(1.0, max(0.2, s_ / 1500.0)))
+            else:
+                if not self._sound_gate("bounce", ("bounce", kind), s_):
+                    return
+                a.play("ball_bounce_{}_{}".format(kind, band), pos, min(1.0, max(0.15, s_ / 1800.0)))
         elif k == "bump":
             s = ev.get("strength", 0.0)
+            if not self._sound_gate("bump", ("bump",) + tuple(sorted((car, ev.get("other", -2)))), s):
+                return
             stage = 0 if s < 500 else (1 if s < 900 else (2 if s < 1400 else 3))
             involved = spectated in (car, ev.get("other", -2))
-            a.play("bump_{}".format(stage), pos, 1.0, involved)
+            a.play("bump_{}".format(stage), pos, min(1.0, max(0.35, s / 1400.0)), involved)
         elif k == "demo":
             a.play("demo", pos, 1.0)
             a.play("demo_small" + sfx, pos, 0.8, local)          # the demolished car's own layer
@@ -2111,6 +2133,8 @@ class RSVRenderer:
             self.fx.on_event(ev, spectated)
         elif k == "body":
             # car body (roof / side / nose) into the floor, a wall or the ceiling
+            if not self._sound_gate("body", ("body", car), ev.get("strength", 0.0)):
+                return
             g = min(1.0, max(0.25, (ev.get("strength", 0.0) - 200.0) / 1200.0))
             a.play("body" + sfx, pos, g, local)
         elif k == "pad":
