@@ -209,14 +209,33 @@ def _kill_job():
 _FFMPEG = None
 
 
+# Hardware encoders first (no CPU load next to a training run), each only if a real test encode works: an
+# ffmpeg can list h264_nvenc while the NVIDIA GPU is powered off (laptop on battery) -> "no CUDA device".
+_ENCODERS = [
+    ("h264_nvenc", ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "20", "-b:v", "0"]),   # NVIDIA
+    ("h264_amf", ["-c:v", "h264_amf", "-quality", "balanced", "-rc", "cqp", "-qp_i", "20", "-qp_p", "22"]),  # AMD
+    ("libx264", ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]),                                   # CPU
+]
+
+
+def _encoder_works(ff, args):
+    try:
+        return subprocess.run([ff, "-hide_banner", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i",
+                               "color=c=black:s=256x144:r=30", "-t", "0.2", "-pix_fmt", "yuv420p", *args,
+                               "-f", "null", "-"], stdin=subprocess.DEVNULL, capture_output=True, timeout=20,
+                              creationflags=CREATE_NO_WINDOW).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def find_ffmpeg():
-    """-> (path, video_codec_args). Prefers an ffmpeg with NVENC (encode on the RTX)."""
+    """-> (path, video_codec_args): the first ffmpeg + H.264 encoder that actually works here
+    (NVENC on the NVIDIA GPU, else AMF on the AMD iGPU, else x264 on the CPU)."""
     global _FFMPEG
     if _FFMPEG is not None:
         return _FFMPEG
     cands = [os.environ.get("RSV_FFMPEG"), os.path.join(ROOT, "bin", "ffmpeg", "ffmpeg.exe"),
              shutil.which("ffmpeg")]
-    x264 = None
     for c in cands:
         if not c or not os.path.isfile(c):
             continue
@@ -225,15 +244,11 @@ def find_ffmpeg():
                                  timeout=10, creationflags=CREATE_NO_WINDOW).stdout
         except (OSError, subprocess.SubprocessError):
             continue
-        if "h264_nvenc" in enc:
-            _FFMPEG = (c, ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "20", "-b:v", "0"])
-            return _FFMPEG
-        if x264 is None and "libx264" in enc:
-            x264 = (c, ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"])
-    if x264 is None:
-        raise RuntimeError("no usable ffmpeg found (set RSV_FFMPEG)")
-    _FFMPEG = x264
-    return _FFMPEG
+        for name, args in _ENCODERS:
+            if name in enc and _encoder_works(c, args):
+                _FFMPEG = (c, args)
+                return _FFMPEG
+    raise RuntimeError("no usable ffmpeg found (install ffmpeg or set RSV_FFMPEG)")
 
 
 def _run_ffmpeg(args):
@@ -982,7 +997,7 @@ def render_clip(spec, out_path, workers=None):
     if k < 1:
         raise MemoryError(why)
     use_rtx = _rtx_ok(k)
-    log("{} worker(s) ({}), GPU: {}".format(k, why, "RTX" if use_rtx else "iGPU (RTX VRAM is busy)"))
+    log("{} worker(s) ({}), GPU: {}".format(k, why, "RTX" if use_rtx else "iGPU (RTX off or busy)"))
     job_dir = tempfile.mkdtemp(prefix="rsv_clip_", dir=os.path.dirname(os.path.abspath(out_path)))
     try:
         bounds = [round(n * i / k) for i in range(k + 1)]
@@ -1029,7 +1044,7 @@ def render_pop_batch(bins, workers=None, keep_bin=False):
         log("NOT rendering: " + why)
         return 0
     use_rtx = _rtx_ok(k)
-    log("{} worker(s) ({}), GPU: {}".format(k, why, "RTX" if use_rtx else "iGPU (RTX VRAM is busy)"))
+    log("{} worker(s) ({}), GPU: {}".format(k, why, "RTX" if use_rtx else "iGPU (RTX off or busy)"))
     job_dir = tempfile.mkdtemp(prefix="rsv_pop_", dir=os.path.dirname(os.path.abspath(bins[0])))
     try:
         procs = [_spawn_worker({"id": i, "mode": "pop", "bins": bins[i::k], "keep_bin": keep_bin,
