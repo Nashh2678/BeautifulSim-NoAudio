@@ -202,6 +202,55 @@ class ClipRecorder:
         except OSError:
             return None
 
+    active = None            # the clip being rendered offline (HUD "Clipping..." indicator)
+
+    def _read_done(self):
+        try:
+            with open(self._done_path, "r", encoding="utf-8", errors="replace") as f:
+                return f.read().strip()
+        except OSError:
+            return None
+
+    def _done_mtime(self):
+        try:
+            return os.path.getmtime(self._done_path)
+        except OSError:
+            return None
+
+    def clip_status(self):
+        """-> None | ("rendering", fraction) | ("saved", seconds since) | ("error", seconds since)."""
+        a = self.active
+        if a is None:
+            return None
+        now = time.time()
+        if a["state"] == "rendering" and now - a.get("_polled", 0.0) > 0.1:
+            a["_polled"] = now
+            try:
+                with open(a["out"] + ".progress", "r") as f:
+                    d, n = f.read().split()
+                a["frac"] = max(a["frac"], 0.95 * min(1.0, int(d) / max(1, int(n))))    # last 5% = mux
+            except (OSError, ValueError):
+                pass
+            mt = self._done_mtime()
+            done = self._read_done() if mt is not None and mt != a["base"] else None
+            if done is not None:
+                a["state"] = "saved" if done == a["out"] else "error"
+                a["frac"] = 1.0
+                a["t_end"] = now
+                try:
+                    os.remove(a["out"] + ".progress")
+                except OSError:
+                    pass
+            elif now - a["t0"] > 90.0:
+                a["state"], a["t_end"] = "error", now
+        if a["state"] == "rendering":
+            return ("rendering", a["frac"])
+        age = now - a["t_end"]
+        if age > (1.0 if a["state"] == "saved" else 2.5):
+            self.active = None
+            return None
+        return (a["state"], age)
+
     def save_clip(self):
         if CLIP_MODE == "replay" and not self._disabled:
             self._save_replay()
@@ -243,6 +292,8 @@ class ClipRecorder:
                            "timeline": [[t, i, m] for t, i, m in cams]}, f)
             logf = open(os.path.join(self.out_dir, "offline_render.log"), "a", encoding="utf-8")
             script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "offline_render.py")
+            self.active = {"out": out, "t0": time.time(), "state": "rendering", "frac": 0.0, "t_end": None,
+                           "base": self._done_mtime()}
             subprocess.Popen([sys.executable, script, "--replay", replay, "--out", out, "--done", self._done_path],
                              stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT,
                              creationflags=0x08000000 if os.name == "nt" else 0)
@@ -250,6 +301,7 @@ class ClipRecorder:
                 now - max(t_start, packets[0][0]), len(packets), out))
         except Exception as e:
             print("[clip] ERROR starting the offline render: {!r}".format(e))
+            self.active = {"out": out, "t0": now, "state": "error", "frac": 0.0, "t_end": time.time(), "base": None}
 
     def _encode(self, frames):
         import cv2

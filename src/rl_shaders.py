@@ -638,7 +638,7 @@ out vec4 f_color;
 void main() {
     float s = sqrt(max(1.0 - v_u * v_u, 0.0));                 // cross-section: 1 at the axis, 0 at the rim
     vec3 c = v_col.rgb * (0.45 + 0.65 * s) + vec3(1.0) * pow(s, 6.0) * 0.28;   // lit core + soft highlight
-    float a = v_col.a * smoothstep(0.0, 0.45, s);
+    float a = v_col.a * pow(s, 1.6);                        // fades out smoothly toward the edges
     f_color = vec4(c * a, a);
 }
 '''
@@ -684,8 +684,8 @@ void main() {
         f_color = vec4(mix(color.rgb, coreCol, rim) * a, a);
         return;
     }
-    if (mode > 1.5) {                                   // soft glow: hot core fading to the rim
-        float g = pow(1.0 - r, 1.6);
+    if (mode > 1.5) {                                   // jump glow: bright out to ~half, soft edge
+        float g = 1.0 - smoothstep(0.40, 1.0, r);
         float a = color.a * g;
         f_color = vec4(mix(color.rgb, coreCol, pow(1.0 - r, 3.0)) * a, a);
         return;

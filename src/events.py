@@ -66,7 +66,7 @@ def _len(a): return math.sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2])
 
 class _Car:
     __slots__ = ("pos", "vel", "ang", "up", "fwd", "on_ground", "has_flip", "demoed", "touched", "team", "speed",
-                 "is_flipping", "world_contact", "jump", "stick")
+                 "is_flipping", "world_contact", "jump", "stick", "stall")
 
 
 def _car_snapshot(jc):
@@ -91,10 +91,50 @@ def _car_snapshot(jc):
     ctl = jc.get("controls")
     if isinstance(ctl, dict) and ctl.get("jump") is not None:
         c.jump = bool(ctl["jump"])
-        c.stick = abs(float(ctl.get("pitch", 0))) + abs(float(ctl.get("yaw", 0))) + abs(float(ctl.get("roll", 0)))
+        pitch, yaw, roll = float(ctl.get("pitch", 0)), float(ctl.get("yaw", 0)), float(ctl.get("roll", 0))
+        c.stick = abs(pitch) + abs(yaw) + abs(roll)
+        # a stall: RocketSim's dodge direction (-pitch, yaw + roll) is ~zero (air roll against yaw), so the
+        # flip branch runs but the car gets no impulse and no rotation
+        c.stall = abs(yaw + roll) < 0.1 and abs(pitch) < 0.1
     else:
-        c.jump, c.stick = None, 0.0
+        c.jump, c.stick, c.stall = None, 0.0, False
     return c
+
+
+# ---- contact points on the car body (sparks): RLBot's Octane hitbox, offset from the car origin ----
+HITBOX_HALF = (59.0, 42.1, 18.08)
+HITBOX_OFF = (13.88, 0.0, 20.75)
+
+
+def _cross(a, b):
+    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+
+
+def _box_frame(c):
+    f, u = c.fwd, c.up
+    r = _cross(u, f)
+    ctr = tuple(c.pos[k] + f[k] * HITBOX_OFF[0] + u[k] * HITBOX_OFF[2] for k in range(3))
+    return ctr, (f, r, u)
+
+
+def box_contact(c, point):
+    """The point of car c's hitbox closest to `point`, and whether it is on the car's UNDERSIDE (the wheels'
+    face) -> (contact, underside)."""
+    ctr, axes = _box_frame(c)
+    d = _sub(point, ctr)
+    loc = [_dot(d, a) for a in axes]
+    cl = [max(-h, min(h, l)) for l, h in zip(loc, HITBOX_HALF)]
+    contact = tuple(ctr[k] + sum(axes[i][k] * cl[i] for i in range(3)) for k in range(3))
+    excess = [abs(l) - h for l, h in zip(loc, HITBOX_HALF)]      # which face the point is beyond the most
+    face = max(range(3), key=lambda i: excess[i])
+    return contact, face == 2 and loc[2] < 0.0
+
+
+def box_surface_contact(c, n):
+    """The hitbox corner that is deepest along -n (the surface normal): where the body meets that surface."""
+    ctr, axes = _box_frame(c)
+    return tuple(ctr[k] - sum(axes[i][k] * HITBOX_HALF[i] * (1.0 if _dot(axes[i], n) > 0 else -1.0)
+                              for i in range(3)) for k in range(3))
 
 
 # ---- flip-reset grant: port of GigaLearnCPP's training-side flip-reset rule (GrantedFlipReset) ----
@@ -336,7 +376,9 @@ class EventDetector:
         if touchers:
             i = touchers[0]
             self.last_touch_team = cars[i].team
-            self._emit(t, "ball_hit", bpos, car=i, team=cars[i].team, strength=dvb_mag)
+            contact, under = box_contact(cars[i], bpos)
+            self._emit(t, "ball_hit", bpos, car=i, team=cars[i].team, strength=dvb_mag, contact=contact,
+                       underside=under)
         elif dvb_mag > 300.0:
             if swept_goal_frame_distance(pb[0], bpos) < POST_CONTACT:
                 surf = "post"                               # goal post OR crossbar clang
@@ -409,7 +451,8 @@ class EventDetector:
                         self._emit(t, "jump", c.pos, car=i, team=c.team, up=p.up)
                     elif p.has_flip:
                         self_impulse.add(i)
-                        self._emit(t, "dodge" if c.stick >= 0.5 else "doublejump", c.pos, car=i, team=c.team, up=c.up)
+                        self._emit(t, "dodge" if c.stick >= 0.5 else "doublejump", c.pos, car=i, team=c.team, up=c.up,
+                                   stall=bool(c.stall))
                 if (not p_srf) and c_srf:
                     into = -_dot(p.vel, c.up)
                     if into > 140.0:
@@ -448,8 +491,10 @@ class EventDetector:
                     if vin_p > BODY_MIN_DV and vin_p - vin_c > BODY_MIN_DV and not wheels_down:
                         self._body_cool[i] = t + 0.3
                         self_impulse.add(i)
-                        contact = (c.pos[0] - n[0] * d_srf, c.pos[1] - n[1] * d_srf, c.pos[2] - n[2] * d_srf)
-                        self._emit(t, "body", contact, car=i, team=c.team, strength=vin_p - vin_c)
+                        corner = box_surface_contact(c, n)
+                        dc = max(0.0, arena_distance(corner))
+                        contact = (corner[0] - n[0] * dc, corner[1] - n[1] * dc, corner[2] - n[2] * dc)
+                        self._emit(t, "body", contact, car=i, team=c.team, strength=vin_p - vin_c, normal=n)
 
             if c.speed >= SUPERSONIC > p.speed:
                 self._emit(t, "supersonic", c.pos, car=i, team=c.team)
@@ -479,7 +524,13 @@ class EventDetector:
                     continue
                 self._pair_cool[(a, b)] = t + 0.3
                 mid = ((ca.pos[0] + cb.pos[0]) / 2, (ca.pos[1] + cb.pos[1]) / 2, (ca.pos[2] + cb.pos[2]) / 2)
-                self._emit(t, "bump", mid, car=a, other=b, strength=max(dva, dvb2))
+                # where the two bodies meet: each car's hitbox point closest to the other's hitbox centre;
+                # sparks only when it is body on body (not one car's wheels landing on the other)
+                pa_c, under_a = box_contact(ca, _box_frame(cb)[0])
+                pb_c, under_b = box_contact(cb, _box_frame(ca)[0])
+                contact = tuple((pa_c[k] + pb_c[k]) / 2 for k in range(3))
+                self._emit(t, "bump", mid, car=a, other=b, strength=max(dva, dvb2), contact=contact,
+                           spark=not (under_a or under_b), normal=_sub(pa_c, pb_c))
 
         # ---- boost pads ----
         if pads is not None and prev_pads is not None and len(pads) == len(prev_pads):

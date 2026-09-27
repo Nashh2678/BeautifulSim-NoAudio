@@ -280,6 +280,114 @@ class RSVRenderer:
         tex.build_mipmaps()
         return tex, (cell_w, cell_h, metrics)
 
+    def _label_texture(self, text):
+        """A single-channel text texture (Bahnschrift SemiBold), cached: (texture, aspect, cap-height fraction)."""
+        cache = self.__dict__.setdefault("_label_tex", {})
+        if text in cache:
+            return cache[text]
+        from PIL import Image, ImageDraw, ImageFont
+        fonts = os.path.join(os.environ.get("WINDIR", "C:/Windows"), "Fonts")
+        font = None
+        for fn in ("bahnschrift.ttf", "segoeuib.ttf", "arialbd.ttf"):
+            try:
+                font = ImageFont.truetype(os.path.join(fonts, fn), 96)
+                try:
+                    font.set_variation_by_name("SemiBold")
+                except Exception:
+                    pass
+                break
+            except OSError:
+                continue
+        if font is None:
+            font = ImageFont.load_default()
+        pad = 8
+        bb = ImageDraw.Draw(Image.new("L", (8, 8))).textbbox((0, 0), text, font=font)
+        cap = ImageDraw.Draw(Image.new("L", (8, 8))).textbbox((0, 0), "H", font=font)
+        w, h = bb[2] - bb[0] + 2 * pad, cap[3] - cap[1] + 2 * pad + 30
+        im = Image.new("L", (w, h), 0)
+        ImageDraw.Draw(im).text((pad - bb[0], pad - cap[1]), text, fill=255, font=font)
+        im = im.transpose(Image.FLIP_TOP_BOTTOM)
+        t = self.ctx.texture(im.size, 1, im.tobytes())
+        t.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+        t.build_mipmaps()
+        cache[text] = (t, w / float(h), (cap[3] - cap[1]) / float(h), pad / float(h))
+        return cache[text]
+
+    def _draw_label(self, text, x, y_top, cap_h, rgba, ortho):
+        tex, aspect, cap_frac, pad_frac = self._label_texture(text)
+        qh = cap_h / cap_frac
+        qw = qh * aspect
+        x0, y0 = x - qw * pad_frac / aspect, y_top - qh * pad_frac
+        arr = np.asarray([(x0, y0, 0.0, 1.0), (x0 + qw, y0, 1.0, 1.0), (x0 + qw, y0 + qh, 1.0, 0.0),
+                          (x0, y0, 0.0, 1.0), (x0 + qw, y0 + qh, 1.0, 0.0), (x0, y0 + qh, 0.0, 0.0)], "f4")
+        self.text_vbo.write(arr.tobytes())
+        self.prog_text["m_vp"].write(ortho.astype("f4"))
+        self.prog_text["Tex"].value = 0
+        self.prog_text["color"].value = tuple(rgba)
+        tex.use(location=0)
+        self.render_target.use()
+        self.text_vao.render(moderngl.TRIANGLES, vertices=6)
+        return qw * (1.0 - 2.0 * pad_frac / aspect)
+
+    @staticmethod
+    def _rect_tris(x0, y0, x1, y1, rgba):
+        return [(x0, y0, 0.0, *rgba), (x1, y0, 0.0, *rgba), (x1, y1, 0.0, *rgba),
+                (x0, y0, 0.0, *rgba), (x1, y1, 0.0, *rgba), (x0, y1, 0.0, *rgba)]
+
+    def render_clip_indicator(self, width, height):
+        """Top-left clip status (scales with the window like the boost gauge): a blinking red dot + "Clipping..."
+        and a progress bar while the clip renders offline, then "Clip saved!" for 1 s (or "Clip failed")."""
+        st = self.clip_recorder.clip_status() if hasattr(self.clip_recorder, "clip_status") else None
+        if st is None:
+            return
+        kind, v = st
+        s = height / 1080.0
+        m = 26.0 * s
+        y = m
+        u = get_ui()
+        try:
+            if u is not None and u.isVisible():                  # stay clear of the stats / settings panel
+                y += u.window().devicePixelRatioF() * (u.geometry().bottom() + 1)
+        except Exception:
+            pass
+        cap = 22.0 * s
+        pw, ph = 300.0 * s, (78.0 if kind == "rendering" else 58.0) * s
+        a = 1.0 if kind == "rendering" else min(1.0, (1.0 if kind == "saved" else 2.5) - v) / 1.0
+        a = max(0.0, min(1.0, a * 3.0))
+        ortho = Matrix44.orthogonal_projection(0.0, width, height, 0.0, -1.0, 1.0)
+        self._hud_ortho = ortho
+        self.ctx.disable(moderngl.DEPTH_TEST)
+        self.ctx.enable(moderngl.BLEND)
+        self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
+        tris = []
+        tris += self._rect_tris(m, y, m + pw, y + ph, (0.03, 0.035, 0.05, 0.72 * a))           # panel
+        accent = {"rendering": (0.95, 0.22, 0.22), "saved": (0.30, 0.90, 0.45), "error": (1.0, 0.30, 0.25)}[kind]
+        tris += self._rect_tris(m, y, m + 5.0 * s, y + ph, (*accent, 0.95 * a))                # accent edge
+        cx, cy, r = m + 26.0 * s, y + 29.0 * s, 8.0 * s
+        if kind == "rendering":
+            blink = 0.55 + 0.45 * math.sin(time.time() * 6.0)
+            dot = (1.0, 0.25, 0.25, blink * a)
+            for k in range(20):                                                          # recording dot
+                a0, a1 = 2 * math.pi * k / 20, 2 * math.pi * (k + 1) / 20
+                tris += [(cx, cy, 0.0, *dot), (cx + r * math.cos(a0), cy + r * math.sin(a0), 0.0, *dot),
+                         (cx + r * math.cos(a1), cy + r * math.sin(a1), 0.0, *dot)]
+            bx0, bx1, by0, by1 = m + 18.0 * s, m + pw - 18.0 * s, y + ph - 22.0 * s, y + ph - 14.0 * s
+            tris += self._rect_tris(bx0, by0, bx1, by1, (1.0, 1.0, 1.0, 0.15 * a))           # bar track
+            tris += self._rect_tris(bx0, by0, bx0 + (bx1 - bx0) * max(0.02, v), by1, (*accent, 0.95 * a))
+        arr = np.asarray(tris, "f4")
+        if len(arr) * 7 * 4 <= self.hud_c_max_verts * 7 * 4:
+            self._hud_draw_tris(arr)
+        label = {"rendering": "Clipping...", "saved": "Clip saved!", "error": "Clip failed"}[kind]
+        tx = m + (44.0 if kind == "rendering" else 20.0) * s
+        tcol = (1.0, 1.0, 1.0, a) if kind == "rendering" else (*accent, a)
+        self._draw_label(label, tx, cy - cap / 2.0, cap, tcol, ortho)
+        if kind == "rendering":
+            pct = "%d%%" % int(round(v * 100))
+            tex, aspect, cap_frac, pad_frac = self._label_texture(pct)
+            wpx = (cap * 0.8) / cap_frac * aspect * (1.0 - 2.0 * pad_frac / aspect)
+            self._draw_label(pct, m + pw - 18.0 * s - wpx, cy - cap * 0.4, cap * 0.8, (1.0, 1.0, 1.0, 0.75 * a), ortho)
+        self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
+
     GOAL_BANNER_S = 3.0          # on screen after a goal (longer while a goal celebration hides the ball)
 
     def _banner_textures(self, team):
@@ -2205,7 +2313,7 @@ class RSVRenderer:
             if teleported:
                 rib.points.clear()
             if len(rib.points) > 1:
-                self.fx.add_trail(rib, self.FLIP_STREAK_LIFE, 0.9, (1.0, 1.0, 1.0, 0.30))
+                self.fx.add_trail(rib, self.FLIP_STREAK_LIFE, 0.9, (1.0, 1.0, 1.0, 0.22))
         if not flipping and not any(r.points for r in ribs):
             del self._corner_ribs[i]
 
@@ -2241,12 +2349,13 @@ class RSVRenderer:
         car = ev.get("car", -1)
         local = car == spectated and car >= 0
         sfx = "_local" if local else "_other"
-        if k == "dodge" and car >= 0:
+        stall = bool(ev.get("stall"))              # a stall: flip input, no impulse and no rotation
+        if k == "dodge" and car >= 0 and not stall:
             self._flip_until[car] = time.time() + self.FLIP_STREAK_EMIT
         if k in ("jump", "doublejump", "dodge"):
             a.play(k + sfx, pos, 0.9, local)
-            if k != "dodge":
-                self.fx.on_event(ev, spectated)
+            if not stall:
+                self.fx.on_event(ev, spectated)            # the jump glow (jumps, double jumps, flips)
         elif k == "flipreset":
             a.play("flipreset" + sfx, pos, 1.0 if local else 0.85, local)
             self.fx.on_event(ev, spectated)
@@ -2264,6 +2373,9 @@ class RSVRenderer:
             band = "close" if d < 1500 else ("mid" if d < 4000 else "far")
             g = min(1.0, 0.45 + ev.get("strength", 0.0) / 2500.0)
             a.play("ball_hit_" + ("close" if local else band), pos, g, local)
+            cp = ev.get("contact")
+            if cp is not None and not ev.get("underside", True):     # body touch (not the wheels): sparks
+                self.fx.sparks(cp, np.subtract(cp, pos), ev.get("strength", 0.0))
         elif k == "ball_bounce":
             d = a.distance(pos)
             band = "close" if d < 1500 else ("mid" if d < 4000 else "far")
@@ -2287,6 +2399,8 @@ class RSVRenderer:
             stage = 0 if s < 500 else (1 if s < 900 else (2 if s < 1400 else 3))
             involved = spectated in (car, ev.get("other", -2))
             a.play("bump_{}".format(stage), pos, min(1.0, max(0.35, s / 1400.0)), involved)
+            if ev.get("spark") and ev.get("contact") is not None:
+                self.fx.sparks(ev["contact"], ev.get("normal", (0, 0, 1)), s)
         elif k == "demo":
             a.play("demo", pos, 1.0)
             a.play("demo_small" + sfx, pos, 0.8, local)          # the demolished car's own layer
@@ -2299,6 +2413,7 @@ class RSVRenderer:
                 return
             g = min(1.0, max(0.25, (ev.get("strength", 0.0) - 200.0) / 1200.0))
             a.play("body" + sfx, pos, g, local)
+            self.fx.sparks(pos, ev.get("normal", (0, 0, 1)), ev.get("strength", 0.0))
         elif k == "pad":
             if local:                                  # RL only plays pickups for your own car
                 a.play("pad_pickup", pos, 0.9, True)
@@ -2327,6 +2442,7 @@ class RSVRenderer:
         self.render_pai_hud(width, height, getattr(state_manager, "gail_hud", None))
         self.render_scoreboard_hud(width, height, getattr(state_manager, "scoreboard", None))
         self.render_goal_banner(width, height, state)
+        self.render_clip_indicator(width, height)
 
         v = self.config.volume.val / 100.0          # settings-panel volume slider drives the mixer
         for name in self.config.SOUND_MIX:          # per-category sliders
@@ -2341,7 +2457,7 @@ class RSVRenderer:
         if state.recv_interval > 0:
             ui_text += "Network rate: {:.2f}fps".format(1 / state.recv_interval) + "\n"
         ui_text += "Ball speed: {:.2f}kph".format(state.ball_state.prev_vel.length * (9 / 250)) + "\n"
-        self._poll_gui_response()
+        self._poll_feed_answer()
         tm = getattr(self, "_toast_msg", None)
         if tm is not None and time.time() - tm[1] < 3.0 and tm[0]:
             ui_text += ">> " + tm[0] + "\n"
@@ -2411,44 +2527,33 @@ class RSVRenderer:
             return True
         return False
 
-    def _send_gui_request(self, req):
-        """Ask the training GUI (it launched this vis with RSV_CLIP_DIR) to change the render feed."""
-        d = os.environ.get("RSV_CLIP_DIR")
-        if not d:
-            self._toast("Needs the training GUI (open the vis from it)")
-            return
-        self._gui_seq = getattr(self, "_gui_seq", 0) + 1
-        req = dict(req, seq="%d-%d" % (os.getpid(), self._gui_seq))
+    FEED_PORT = 9275     # the sender's side channel (focus heartbeats + these requests), see networking-format.md
+
+    def _send_feed_request(self, msg, label):
+        """Visualizer key -> the game sender: b"view:<n>" (team size) or b"det:<0|1>" (bot actions). The sender
+        decides (e.g. only team sizes its bot's observation supports) and answers with "vis_msg" in a packet."""
         try:
-            tmp = os.path.join(d, "vis_request.json.tmp")
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(req, f)
-            os.replace(tmp, os.path.join(d, "vis_request.json"))
-            self._gui_wait = (req["seq"], time.time())
-            self._toast("...")
+            if getattr(self, "_feed_sock", None) is None:
+                import socket as _s
+                self._feed_sock = _s.socket(_s.AF_INET, _s.SOCK_DGRAM)
+            self._feed_sock.sendto(msg, ("127.0.0.1", self.FEED_PORT))
+            self._feed_wait = time.time()
+            self._toast("Requested " + label + "...")
         except OSError as e:
-            self._toast("Could not reach the GUI: {}".format(e))
+            self._toast("Could not reach the sender: {}".format(e))
 
     def _toast(self, msg):
         self._toast_msg = (msg, time.time())
 
-    def _poll_gui_response(self):
-        w = getattr(self, "_gui_wait", None)
-        if w is None:
-            return
-        seq, t0 = w
-        if time.time() - t0 > 2.0:
-            self._gui_wait = None
-            self._toast("The training GUI did not answer (is it running?)")
-            return
-        try:
-            with open(os.path.join(os.environ.get("RSV_CLIP_DIR", ""), "vis_response.json"), "r", encoding="utf-8") as f:
-                resp = json.load(f)
-        except (OSError, ValueError):
-            return
-        if resp.get("seq") == seq:
-            self._gui_wait = None
-            self._toast(resp.get("msg") or "")
+    def _poll_feed_answer(self):
+        vm = getattr(state_manager, "vis_msg", None)
+        w = getattr(self, "_feed_wait", None)
+        if vm is not None and w is not None and vm[1] >= w:
+            self._feed_wait = None
+            self._toast(vm[0])
+        elif w is not None and time.time() - w > 1.5:
+            self._feed_wait = None
+            self._toast("No answer: this sender doesn't handle visualizer keys")
 
     def handle_key_press(self, event):
         # Ball-cam toggle (Space) — like Rocket League. Ignore auto-repeat so a hold = one toggle.
@@ -2468,16 +2573,17 @@ class RSVRenderer:
 
         # Team size of the spectated arena: '&' / 'e-acute' / '"' (AZERTY number row) or 1 / 2 / 3.
         # Bot actions: S = stochastic, D = deterministic (not while a pose editor / play tool owns ZQSD).
-        # Sent to the training GUI, which applies them like its own menus (only modes this bot trains).
+        # Sent to the game sender (UDP side channel), which decides and answers (see networking-format.md).
         size = {Qt.Key_Ampersand: 1, Qt.Key_1: 1, Qt.Key_Eacute: 2, Qt.Key_2: 2,
                 Qt.Key_QuoteDbl: 3, Qt.Key_3: 3}.get(event.key())
         if size is not None and not event.isAutoRepeat():
-            self._send_gui_request({"render_view": size})
+            self._send_feed_request(b"view:%d" % size, "%dv%d" % (size, size))
             return
         if event.key() in (Qt.Key_S, Qt.Key_D) and not event.isAutoRepeat() and not (
                 getattr(state_manager, "edit_mode", False) or state_manager.is_pose_edit_allowed()
                 or state_manager.is_input_captured()):
-            self._send_gui_request({"vis_deterministic": event.key() == Qt.Key_D})
+            det = event.key() == Qt.Key_D
+            self._send_feed_request(b"det:1" if det else b"det:0", "deterministic" if det else "stochastic")
             return
 
         # Save a clip of the last 12 gameplay seconds to mp4

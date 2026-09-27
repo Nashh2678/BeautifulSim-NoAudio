@@ -72,6 +72,10 @@ class SocketListener:
                 # render_scoreboard_hud() draws nothing.
                 state_manager.scoreboard = j.get("scoreboard") if isinstance(j, dict) else None
 
+                # Optional answer from the sender to a visualizer key (1/2/3, S/D), shown in the panel.
+                if isinstance(j, dict) and j.get("vis_msg"):
+                    state_manager.vis_msg = (str(j["vis_msg"]), time.time())
+
                 recv_time = time.time()
 
                 # Queued for smooth playback (state_manager.PlayoutClock): the render thread applies it

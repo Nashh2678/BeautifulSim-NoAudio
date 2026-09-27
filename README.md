@@ -55,9 +55,9 @@ Run several instances side by side with `RSV_PORT=<port>`.
 | Space | ball cam on/off |
 | P | spectate the player closest to the ball |
 | A | auto camera on/off (follows whoever is closest to the ball) |
-| `&` `é` `"` (or 1 2 3) | spectate 1v1 / 2v2 / 3v3 (with a GigaLearnCPP training GUI that supports it; only modes the bot trains) |
-| S / D | bot actions stochastic / deterministic (same GUI) |
-| C | save a clip of the last 12 s (mp4, in `clips/`) |
+| `&` `é` `"` (or 1 2 3) | ask the sender to show 1v1 / 2v2 / 3v3 (it switches only if its bot's observation supports that team size) |
+| S / D | ask the sender for stochastic / deterministic bot actions |
+| C | save a clip of the last 12 s (mp4, in `clips/`; a top-left indicator shows the render progress) |
 | M | mute (when sound files are installed) |
 | `[` / `]` | volume down / up |
 | H | show/hide the top-left panel (Edit Settings: camera, audio, graphics) |
@@ -65,6 +65,10 @@ Run several instances side by side with `RSV_PORT=<port>`.
 **Graphics** (H → Edit Settings → Graphics, applied live): anti-aliasing (MSAA off/2x/4x/8x), resolution
 (Balanced caps the 3D scene at 2.1 MP and upscales it: pick Native on a 1440p/4K screen if it looks soft, or
 Supersampled for extra smoothness), distant detail, VSync, frame-rate cap. Camera settings mirror Rocket League's.
+
+The 1/2/3 and S/D keys are requests sent to whatever is streaming the game (a small UDP side channel, see
+[networking-format.md](networking-format.md)). A sender that doesn't handle them keeps working; the visualizer
+just says nobody answered.
 
 ## Sound
 
@@ -83,8 +87,10 @@ there are git-ignored, so they never get committed by accident.
 - **Cars and ball**: team-painted cars, a two-seam ball that darkens as it crosses the goal line, boost pads that
   fade back in while recharging.
 - **Ball trail**: like Rocket League, a round tube in the colour of the last team to touch the ball, shown above
-  100 kph, white right behind the ball and fading out over 600 ms.
-- **Effects**: boost flames, supersonic trails, jump flashes, demolition explosions, goal bursts, boost pad
+  75 kph, white right behind the ball, soft at the edges and fading out over 600 ms.
+- **Effects**: boost flames, supersonic trails, jump and flip flashes, sparks where a car's body (not its wheels)
+  hits the ball, the arena or another car, faint streaks from the car's corners while it flips, demolition
+  explosions, goal bursts, boost pad
   pickups, a boost gauge, a Rocket League-style flip-reset indicator (a white disc under the car's wheels,
   as long as the car, for 120 ms), and golden "BLUE SCORED!" / "ORANGE SCORED!" text on goals.
 - **Game events** reconstructed from the state stream: jumps, double jumps, flips (including wall dashes),
@@ -93,7 +99,8 @@ there are git-ignored, so they never get committed by accident.
 - **Smooth playback**: incoming states go through a small jitter buffer, so uneven packet timing from a busy
   trainer doesn't show as stutter.
 - **Clips**: C saves the last 12 s by re-rendering them offscreen at 1080p60 (hardware-encoded with NVIDIA NVENC or AMD AMF when available, else on the CPU),
-  so recording never slows the live view; installed sounds are mixed in.
+  so recording never slows the live view; installed sounds are mixed in. A top-left indicator shows
+  "Clipping..." with a progress bar, then "Clip saved!".
 
 ## Credits
 

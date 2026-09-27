@@ -812,6 +812,20 @@ class OfflineRenderer:
         self.r.cam_manual = cam_manual
         return ti
 
+    progress_path = None     # workers: frames encoded so far -> this file (the parent adds them up)
+    progress_total = None    # in-process render: write "<done> <total>" straight to the clip's .progress
+
+    def _write_progress(self, done):
+        if not self.progress_path:
+            return
+        try:
+            tmp = self.progress_path + ".tmp"
+            with open(tmp, "w") as f:
+                f.write(str(done) if self.progress_total is None else "%d %d" % (done, self.progress_total))
+            os.replace(tmp, self.progress_path)
+        except OSError:
+            pass
+
     def render_range(self, src, t0, f_a, f_b, out_video, warmup=WARMUP_S):
         """Encode frames [f_a, f_b) of the clip (frame f at t0 + f/fps) to out_video. A warm-up of
         `warmup` seconds before f_a is replayed at WARMUP_FPS but not encoded. -> audio export dict."""
@@ -871,6 +885,8 @@ class OfflineRenderer:
         pending = None
         try:
             for f in range(f_a, f_b):
+                if (f - f_a) % 6 == 0:
+                    self._write_progress(f - f_a)
                 T = t0 + f / self.fps
                 VCLOCK.t = T
                 while pi < len(packets) and packets[pi][0] <= T:
@@ -959,11 +975,26 @@ def _spawn_worker(job, job_dir):
     return p
 
 
-def _collect(procs, job_dir, timeout_s):
+def _collect(procs, job_dir, timeout_s, progress=None):
     """wait for all workers (killing them all if one fails or the deadline passes); echo their
-    [offline] lines (and any traceback) into our own log."""
+    [offline] lines (and any traceback) into our own log. progress = (clip .progress path, total frames,
+    per-worker progress files): the frames encoded so far are summed into the clip's .progress for the vis."""
     deadline = time.perf_counter() + timeout_s
     while any(p.poll() is None for p in procs):
+        if progress is not None:
+            done = 0
+            for pf in progress[2]:
+                try:
+                    done += int(open(pf).read().strip() or 0)
+                except (OSError, ValueError):
+                    pass
+            try:
+                tmp = progress[0] + ".tmp"
+                with open(tmp, "w") as f:
+                    f.write("%d %d" % (done, progress[1]))
+                os.replace(tmp, progress[0])
+            except OSError:
+                pass
         failed = any(p.poll() not in (None, 0) for p in procs)
         if failed or time.perf_counter() > deadline:
             log("worker failed or render timed out after {:.0f}s -- stopping all workers".format(timeout_s)
@@ -1013,12 +1044,13 @@ def render_clip(spec, out_path, workers=None):
             job = {"id": i, "mode": "segment", "spec": spec, "t0": t0, "f_a": bounds[i], "f_b": bounds[i + 1],
                    "use_rtx": use_rtx,
                    "video": os.path.join(job_dir, "seg_{:02d}.mp4".format(i)),
-                   "audio": os.path.join(job_dir, "seg_{:02d}.json".format(i))}
+                   "audio": os.path.join(job_dir, "seg_{:02d}.json".format(i)),
+                   "progress": os.path.join(job_dir, "progress_{}.txt".format(i))}
             jobs.append(job)
             procs.append(_spawn_worker(job, job_dir))
         if os.path.exists(os.path.join(SOUND_DIR, "manifest.json")) and sound_bank(build=False) is None:
             sound_bank()                    # first run: build the cache while the workers render
-        _collect(procs, job_dir, 120.0)
+        _collect(procs, job_dir, 120.0, progress=(out_path + ".progress", n, [j["progress"] for j in jobs]))
         bad = [j["id"] for j, p in zip(jobs, procs) if p.returncode != 0 or not os.path.isfile(j["audio"])]
         for b_ in bad:                                   # full tail of each failed worker's log
             try:
@@ -1072,7 +1104,9 @@ def run_worker(job_path):
     if job["mode"] == "segment":
         src = load_source(job["spec"])
         t_r = time.perf_counter()
+        rr.progress_path = job.get("progress")
         part = rr.render_range(src, job["t0"], job["f_a"], job["f_b"], job["video"])
+        rr._write_progress(job["f_b"] - job["f_a"])
         log("segment {}: frames {}-{} rendered in {:.1f}s (process up {:.1f}s before init)".format(
             job["id"], job["f_a"], job["f_b"], time.perf_counter() - t_r, t_imp - _T_PROC0))
         with open(job["audio"], "w", encoding="utf-8") as f:

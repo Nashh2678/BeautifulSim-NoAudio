@@ -27,6 +27,7 @@ GOAL_FX_SPEED = 0.7       # goal explosion playback speed
 RESET_DISC_RADIUS = 59.0
 RESET_DISC_FWD = 9.0
 RESET_DISC_BELOW = 14.0
+JUMP_GLOW_LIFE = 0.15        # jump / flip glow
 RESET_DISC_LIFE = 0.12
 
 TRAIL_VERT = """
@@ -465,13 +466,14 @@ class FX:
             if car is not None and car >= 0:
                 self.reset_discs = [d for d in self.reset_discs if d["car"] != car]
                 self.reset_discs.append({"car": car, "age": 0.0, "drawn": 0})
-        elif k in ("jump", "doublejump"):
-            # RL jump burst: a quick warm flash of light under the chassis, ~75 ms
+        elif k in ("jump", "doublejump", "dodge"):
+            # RL jump burst (jumps, double jumps and flips; not stalls): a warm red-orange glow in the
+            # wheel plane at the take-off point, a bit wider than the car so its edge shows around the body
+            # and it opens up as the car leaves. Full size at once, 150 ms (holds, then fades out).
             up = np.asarray(ev.get("up", (0, 0, 1)), "f4")
-            # small red-orange glow under the chassis, full size at once, linear fade over 200 ms
-            c = pos - up * 8.0                                   # under the chassis, above the floor at take-off
-            self.ring(c, up, 48.0, 48.0, 0.20, 0.0, (1.0, 0.30, 0.06, 0.9), core=(1.0, 0.70, 0.35), mode=2,
-                      billboard=True)        # camera-facing: visible from the chase cam at take-off too
+            c = pos - up * RESET_DISC_BELOW                      # wheel-bottom level: just above the floor
+            self.ring(c, up, 80.0, 80.0, JUMP_GLOW_LIFE, 0.0, (1.0, 0.32, 0.07, 0.95), core=(1.0, 0.72, 0.38),
+                      mode=2)
         elif k == "demo":
             # DEMO_SCALE: the whole explosion 20% bigger (sizes, spread speeds, offsets, gravity, ring radii);
             # same timing, same look
@@ -536,6 +538,28 @@ class FX:
                            np.array([1, 1, 1, 1.0], "f4"), np.array([*col, 0.0], "f4"), drag=1.4 * v, grav=300.0 * v * v)
             self.ring(pos, (0, 1, 0), 60.0, 1600.0, 0.7 / v, 0.07, (*col, 1.0), core=(1, 1, 1))
             self.ring(pos, (0, 0, 1), 60.0, 1300.0, 0.8 / v, 0.05, (*col, 0.8), core=(1, 1, 1), delay=0.08 / v)
+
+    def sparks(self, pos, normal, strength):
+        """Metal-on-metal sparks where the car BODY touched something (ball, arena, another car): a short
+        white-yellow flash and a spray of hot specks thrown out along the surface, falling and cooling to
+        orange. Size / count / speed scale with the impact strength (uu/s)."""
+        rng = self._rng
+        pos = np.asarray(pos, "f4")
+        nrm = np.asarray(normal, "f4")
+        ln = float(np.linalg.norm(nrm))
+        nrm = nrm / ln if ln > 1e-4 else np.array([0, 0, 1], "f4")
+        s = float(np.clip((strength - 100.0) / 1400.0, 0.15, 1.0))
+        self.add.spawn(pos[None, :], np.zeros((1, 3), "f4"), np.array([0.07], "f4"), np.array([40.0 + 50.0 * s], "f4"),
+                       300.0, np.array([1.0, 0.93, 0.75, 0.8], "f4"), np.array([1.0, 0.55, 0.2, 0.0], "f4"))
+        n = int(14 + 34 * s)
+        d = self._rand_dirs(n)
+        d -= nrm[None, :] * (d @ nrm)[:, None] * 0.7        # mostly along the surface...
+        d += nrm[None, :] * 0.45                             # ...and away from it
+        d /= np.linalg.norm(d, axis=1, keepdims=True) + 1e-6
+        self.add.spawn(np.repeat(pos[None, :], n, 0), d * rng.uniform(450.0, 1500.0, (n, 1)) * (0.6 + 0.6 * s),
+                       rng.uniform(0.18, 0.50, n), rng.uniform(7.0, 12.0, n), 2.0,
+                       np.array([1.0, 0.90, 0.55, 1.0], "f4"), np.array([1.0, 0.38, 0.04, 0.0], "f4"),
+                       drag=1.6, grav=1100.0)
 
     # ---------------------------------------------------------------------------------------- #
     def wheel_glow_for(self, idx, now):
@@ -692,7 +716,10 @@ class FX:
                     rad = max(rad, 0.018 * float(np.linalg.norm(g.center - np.asarray(cam_pos, "f4"))))
                 rp["radius"].value = float(rad)
                 rp["mode"].value = float(g.mode)
-                a = g.color[3] * ((1.0 - t) if g.mode else (1.0 - t) ** 1.3)
+                if g.mode == 2:                  # jump glow: holds, then fades (reads as its full 150 ms)
+                    a = g.color[3] * (1.0 - t * t)
+                else:
+                    a = g.color[3] * ((1.0 - t) if g.mode else (1.0 - t) ** 1.3)
                 rp["color"].value = (g.color[0], g.color[1], g.color[2], a)
                 rp["coreCol"].value = tuple(g.core)
                 rp["width"].value = float(g.width if g.mode else g.width * (1.0 - 0.5 * t))
