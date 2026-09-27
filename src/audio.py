@@ -356,6 +356,10 @@ class EngineStream:
         self.model = model
         self.boost_loop = boost_loop
         self._lock = threading.Lock()
+        # Held around every mixer-channel call of the feeder AND by stop(): once stop() returns the feeder can
+        # no longer be inside a channel call, so the mixer can be shut down safely (it used to segfault when
+        # pygame.mixer.quit() raced a ch.play() of the feeder thread).
+        self._chlock = threading.Lock()
         self._eng = None             # (params, l, r)
         self._boost = (False, 0.0, 0.0, 0.0)
         self._b_phase = 0.0
@@ -375,14 +379,15 @@ class EngineStream:
             self._boost = (bool(on), l, r, speed)
 
     def stop(self):
-        with self._lock:
-            self._running = False
-            self._eng = None
-            self._boost = (False, 0.0, 0.0, 0.0)
-        try:
-            self.ch.fadeout(30)                       # a hard stop mid-waveform clicks
-        except Exception:
-            pass
+        with self._chlock:
+            with self._lock:
+                self._running = False
+                self._eng = None
+                self._boost = (False, 0.0, 0.0, 0.0)
+            try:
+                self.ch.fadeout(30)                   # a hard stop mid-waveform clicks
+            except Exception:
+                pass
 
     def render_block(self, n, eng, boost):
         """Pure function of the given state (used by the live thread AND offline_render)."""
@@ -423,16 +428,19 @@ class EngineStream:
             if not running:
                 continue
             try:
-                if self.ch.get_queue() is None:
-                    out = self.render_block(self.BLOCK, eng, boost)
-                    if not self.ch.get_busy():                # the channel ran dry (feeder starved): fade in
-                        out[:self.FADE_IN] *= np.linspace(0.0, 1.0, self.FADE_IN, dtype="f4")[:, None]
-                    snd = self.pg.sndarray.make_sound(
-                        np.ascontiguousarray((np.clip(out, -1.0, 1.0) * 32767.0).astype("<i2")))
-                    if self.ch.get_busy():
-                        self.ch.queue(snd)
-                    else:
-                        self.ch.play(snd)
+                with self._chlock:
+                    if not self._running:                     # stopped while we waited for the lock
+                        continue
+                    if self.ch.get_queue() is None:
+                        out = self.render_block(self.BLOCK, eng, boost)
+                        if not self.ch.get_busy():            # the channel ran dry (feeder starved): fade in
+                            out[:self.FADE_IN] *= np.linspace(0.0, 1.0, self.FADE_IN, dtype="f4")[:, None]
+                        snd = self.pg.sndarray.make_sound(
+                            np.ascontiguousarray((np.clip(out, -1.0, 1.0) * 32767.0).astype("<i2")))
+                        if self.ch.get_busy():
+                            self.ch.queue(snd)
+                        else:
+                            self.ch.play(snd)
             except Exception as e:
                 print("[audio] engine stream error: {!r}".format(e))
                 time.sleep(0.5)

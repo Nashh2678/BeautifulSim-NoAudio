@@ -219,7 +219,8 @@ void main() {
             // deep "paint" team colours (the lighter blueCol / orangeCol are for glows and trims)
             const vec3 PAINT_B = vec3(0.012, 0.10, 0.78), PAINT_O = vec3(0.82, 0.16, 0.02);
             vec3 tc = q.y < 0.0 ? PAINT_B : PAINT_O;
-            tc = mix(vec3(dot(tc, vec3(0.2126, 0.7152, 0.0722))), tc, 0.5);    // half the saturation
+            // saturation vs the deep paint: blue half 0.65 (+30% over the orange 0.5), orange half 0.5
+            tc = mix(vec3(dot(tc, vec3(0.2126, 0.7152, 0.0722))), tc, q.y < 0.0 ? 0.65 : 0.5);
             float ax = abs(q.x), ay = abs(q.y), g = 5120.0 - ay, r = length(q);
             float fill = 0.0, dark = 0.0, white = 0.0, zone = 0.0;
             // 1) solid box in front of the goal (640 deep, +-1500) with dark ">" chevrons
@@ -276,6 +277,7 @@ void main() {
         // floor->wall curve in the colour of the team whose half it is (switches at the halfway line),
         // brighter toward its top edge, with a glowing rim like RL's arena boards
         vec3 rc = mix(vec3(0.012, 0.10, 0.78), vec3(0.82, 0.16, 0.02), smoothstep(-30.0, 30.0, p.y));
+        rc = mix(vec3(dot(rc, vec3(0.2126, 0.7152, 0.0722))), rc, 0.7);     // 30% less saturated
         float h = clamp(p.z / 250.0, 0.0, 1.0);
         col = rc * (0.55 + 0.35 * h) * (0.92 + 0.08 * step(0.5, fract(p.z / 55.0)));
         emis += rc * (0.10 + 0.25 * h) + mix(rc, vec3(1.0), 0.35) * 0.8 * aline(p.z - 244.0, 5.0);

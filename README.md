@@ -55,6 +55,8 @@ Run several instances side by side with `RSV_PORT=<port>`.
 | Space | ball cam on/off |
 | P | spectate the player closest to the ball |
 | A | auto camera on/off (follows whoever is closest to the ball) |
+| `&` `é` `"` (or 1 2 3) | spectate 1v1 / 2v2 / 3v3 (with a GigaLearnCPP training GUI that supports it; only modes the bot trains) |
+| S / D | bot actions stochastic / deterministic (same GUI) |
 | C | save a clip of the last 12 s (mp4, in `clips/`) |
 | M | mute (when sound files are installed) |
 | `[` / `]` | volume down / up |

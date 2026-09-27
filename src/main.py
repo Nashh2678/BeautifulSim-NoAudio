@@ -109,6 +109,22 @@ def _icosphere(subdiv):
 
 
 # TODO: Move game logic out of here
+def _streak_points(pos):
+    """The car MODEL's tips the flip streaks come off (read from the loaded mesh, car space): both spoiler tips
+    (rear, outermost and highest) and both front fender corners (front, outermost and highest)."""
+    P = np.asarray(pos, "f4")
+    out = []
+    for rear in (False, True):
+        m0 = P[:, 0] < -20.0 if rear else P[:, 0] > 30.0
+        for side in (1.0, -1.0):
+            q = P[m0 & (np.sign(P[:, 1]) == side)]
+            if len(q) == 0:
+                continue
+            score = np.abs(q[:, 1]) + q[:, 2] + (-0.3 if rear else 0.5) * q[:, 0]
+            out.append(tuple(float(v) for v in q[int(np.argmax(score))]))
+    return out
+
+
 def _octane_from_obj(obj_path, tex_path):
     """RocketSimVis's own Octane.obj -> the Octane_RL.npz layout (pos, nrm, per-vertex material id for
     the car shader: 0 team paint, 1 trim, 2 tire, 3 metal, 5 lights, 7 matte black), classified from
@@ -472,6 +488,7 @@ class RSVRenderer:
             vbo = self.ctx.buffer(wi.tobytes())
             self.wheel_vaos.append(self.ctx.vertex_array(self.prog_car, [(vbo, "3f 3f 1f", "in_position", "in_normal", "in_mat")]))
         self.wheel_rig = carrig.WheelRig(oct_npz["wheel_centers"], oct_npz["wheel_radius"])
+        self.car_streak_points = _streak_points(oct_npz["pos"])   # flip streaks come off these model points
 
         # Ball: smooth icosphere (radius = RocketSim soccar ball) + procedural panel shader.
         sv, sf_, panel_dirs = _icosphere(4)
@@ -1984,7 +2001,8 @@ class RSVRenderer:
             team = int(car_state.team_num) & 1
 
             self.fx.car_poses[i] = (car_pos, car_forward, car_up)      # flip-reset disc follows the car
-            self._update_flip_streaks(i, car_pos, car_forward, car_up, delta_time, car_state.phys.is_teleporting())
+            self._update_flip_streaks(i, car_pos, car_forward, car_up, delta_time, car_state.phys.is_teleporting(),
+                                      bool(car_state.on_ground))
             car_model = self._model_matrix(car_pos, car_forward, car_up).tobytes()
             self.prog_car["m_model"].write(car_model)
             self.prog_car["bodyCol"].value = TEAM_BODY[team]
@@ -2165,22 +2183,23 @@ class RSVRenderer:
     BALL_TRAIL_SPEED = 75.0 / 0.036                           # 75 kph in uu/s (1 uu = 1 cm)
     BALL_TRAIL_TAIL = 0.60           # after the ball drops under 75 kph it keeps emitting, fainter and fainter
     BALL_TRAIL_LIFE = 0.60
-    TEAM_TRAIL = ((0.30, 0.45, 1.0), (1.0, 0.52, 0.12))
+    # 70% of the previous saturation ((0.30, 0.45, 1.0) / (1.0, 0.52, 0.12)): 70% of the way from grey, same luminance
+    TEAM_TRAIL = ((0.347, 0.452, 0.837), (0.878, 0.542, 0.262))
 
     # Flip streaks: very faint, very thin white lines left by the car's four upper corners while it flips.
     FLIP_STREAK_EMIT = 0.60          # a dodge's rotation lasts ~0.6 s
     FLIP_STREAK_LIFE = 0.40          # each point fully faded after 400 ms
-    CAR_TOP_CORNERS = ((74.0, 43.0, 40.0), (74.0, -43.0, 40.0), (-46.0, 43.0, 40.0), (-46.0, -43.0, 40.0))
 
-    def _update_flip_streaks(self, i, car_pos, car_forward, car_up, delta_time, teleported):
+    def _update_flip_streaks(self, i, car_pos, car_forward, car_up, delta_time, teleported, on_surface):
         ribs = self._corner_ribs.get(i)
-        flipping = time.time() < self._flip_until.get(i, 0.0)
+        # airborne flips only: nothing while the wheels touch the floor / a wall (wavedash, wall dash)
+        flipping = time.time() < self._flip_until.get(i, 0.0) and not on_surface
         if ribs is None:
             if not flipping:
                 return
-            ribs = self._corner_ribs[i] = [RibbonEmitter() for _ in self.CAR_TOP_CORNERS]
+            ribs = self._corner_ribs[i] = [RibbonEmitter() for _ in self.car_streak_points]
         left = fastvec.cross(car_up, car_forward)
-        for rib, (cx, cy, cz) in zip(ribs, self.CAR_TOP_CORNERS):
+        for rib, (cx, cy, cz) in zip(ribs, self.car_streak_points):
             p = car_pos + car_forward * cx + left * cy + car_up * cz
             rib.update(flipping, 0, Vector3(p), Vector3((0.0, 0.0, 0.0)), self.FLIP_STREAK_LIFE, delta_time)
             if teleported:
@@ -2211,7 +2230,7 @@ class RSVRenderer:
         if len(self.ball_trail.points) > 1 and team is not None:
             self._trail_team = int(team) & 1
         if len(self.ball_trail.points) > 1:
-            self.fx.add_tube(self.ball_trail, self.BALL_TRAIL_LIFE, 20.0,
+            self.fx.add_tube(self.ball_trail, self.BALL_TRAIL_LIFE, 14.0,
                              (*self.TEAM_TRAIL[getattr(self, "_trail_team", 0)], 0.55),
                              white_from=91.25, white_len=50.0)
 
@@ -2322,6 +2341,10 @@ class RSVRenderer:
         if state.recv_interval > 0:
             ui_text += "Network rate: {:.2f}fps".format(1 / state.recv_interval) + "\n"
         ui_text += "Ball speed: {:.2f}kph".format(state.ball_state.prev_vel.length * (9 / 250)) + "\n"
+        self._poll_gui_response()
+        tm = getattr(self, "_toast_msg", None)
+        if tm is not None and time.time() - tm[1] < 3.0 and tm[0]:
+            ui_text += ">> " + tm[0] + "\n"
         ui_text += "Camera: {}  [A] auto  [P] closest  [Space] ball cam".format(
             "auto" if self.auto_cam_enabled() else "manual") + "\n"
         if self.audio.ok:
@@ -2388,6 +2411,45 @@ class RSVRenderer:
             return True
         return False
 
+    def _send_gui_request(self, req):
+        """Ask the training GUI (it launched this vis with RSV_CLIP_DIR) to change the render feed."""
+        d = os.environ.get("RSV_CLIP_DIR")
+        if not d:
+            self._toast("Needs the training GUI (open the vis from it)")
+            return
+        self._gui_seq = getattr(self, "_gui_seq", 0) + 1
+        req = dict(req, seq="%d-%d" % (os.getpid(), self._gui_seq))
+        try:
+            tmp = os.path.join(d, "vis_request.json.tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(req, f)
+            os.replace(tmp, os.path.join(d, "vis_request.json"))
+            self._gui_wait = (req["seq"], time.time())
+            self._toast("...")
+        except OSError as e:
+            self._toast("Could not reach the GUI: {}".format(e))
+
+    def _toast(self, msg):
+        self._toast_msg = (msg, time.time())
+
+    def _poll_gui_response(self):
+        w = getattr(self, "_gui_wait", None)
+        if w is None:
+            return
+        seq, t0 = w
+        if time.time() - t0 > 2.0:
+            self._gui_wait = None
+            self._toast("The training GUI did not answer (is it running?)")
+            return
+        try:
+            with open(os.path.join(os.environ.get("RSV_CLIP_DIR", ""), "vis_response.json"), "r", encoding="utf-8") as f:
+                resp = json.load(f)
+        except (OSError, ValueError):
+            return
+        if resp.get("seq") == seq:
+            self._gui_wait = None
+            self._toast(resp.get("msg") or "")
+
     def handle_key_press(self, event):
         # Ball-cam toggle (Space) — like Rocket League. Ignore auto-repeat so a hold = one toggle.
         if event.key() == Qt.Key_Space:
@@ -2402,6 +2464,20 @@ class RSVRenderer:
                 self._auto_cam_key = not self.auto_cam_enabled()
                 self._vis_auto_candidate = -1
                 self._kickoff_pick_done = False
+            return
+
+        # Team size of the spectated arena: '&' / 'e-acute' / '"' (AZERTY number row) or 1 / 2 / 3.
+        # Bot actions: S = stochastic, D = deterministic (not while a pose editor / play tool owns ZQSD).
+        # Sent to the training GUI, which applies them like its own menus (only modes this bot trains).
+        size = {Qt.Key_Ampersand: 1, Qt.Key_1: 1, Qt.Key_Eacute: 2, Qt.Key_2: 2,
+                Qt.Key_QuoteDbl: 3, Qt.Key_3: 3}.get(event.key())
+        if size is not None and not event.isAutoRepeat():
+            self._send_gui_request({"render_view": size})
+            return
+        if event.key() in (Qt.Key_S, Qt.Key_D) and not event.isAutoRepeat() and not (
+                getattr(state_manager, "edit_mode", False) or state_manager.is_pose_edit_allowed()
+                or state_manager.is_input_captured()):
+            self._send_gui_request({"vis_deterministic": event.key() == Qt.Key_D})
             return
 
         # Save a clip of the last 12 gameplay seconds to mp4

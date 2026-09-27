@@ -22,6 +22,8 @@ from rl_shaders import PARTICLE_VERT, PARTICLE_FRAG, RING_VERT, RING_FRAG, TUBE_
 # Flip-reset indicator (RL): a disc in the car's wheel plane whose DIAMETER is the car's length, centred
 # under the middle of the car, 120 ms linear fade. (Octane: ~118 uu long; wheel midpoint ~9 uu ahead of
 # the origin; wheel contact plane 17 uu below it -- 14 keeps it just off the ball it sits on.)
+DEMO_SCALE = 1.2          # demolition explosion size
+GOAL_FX_SPEED = 0.7       # goal explosion playback speed
 RESET_DISC_RADIUS = 59.0
 RESET_DISC_FWD = 9.0
 RESET_DISC_BELOW = 14.0
@@ -471,62 +473,69 @@ class FX:
             self.ring(c, up, 48.0, 48.0, 0.20, 0.0, (1.0, 0.30, 0.06, 0.9), core=(1.0, 0.70, 0.35), mode=2,
                       billboard=True)        # camera-facing: visible from the chase cam at take-off too
         elif k == "demo":
+            # DEMO_SCALE: the whole explosion 20% bigger (sizes, spread speeds, offsets, gravity, ring radii);
+            # same timing, same look
+            S = DEMO_SCALE
             vel = np.asarray(ev.get("vel", (0, 0, 0)), "f4") * 0.25
             pos = pos.copy(); pos[2] = max(float(pos[2]), 60.0)
             rng = self._rng
             # 1) blinding flash
-            self.add.spawn(pos[None, :], vel[None, :], np.array([0.14], "f4"), np.array([650.0], "f4"),
-                           1200.0, np.array([1, 0.97, 0.85, 1.0], "f4"), np.array([1, 0.6, 0.2, 0.0], "f4"))
+            self.add.spawn(pos[None, :], vel[None, :], np.array([0.14], "f4"), np.array([650.0 * S], "f4"),
+                           1200.0 * S, np.array([1, 0.97, 0.85, 1.0], "f4"), np.array([1, 0.6, 0.2, 0.0], "f4"))
             # 2) hot core: bright yellow -> orange puffs that STAY fire-coloured while they fade
             n = 70
             d = self._rand_dirs(n); d[:, 2] = np.abs(d[:, 2]) * 0.8 + 0.2
-            self.alpha.spawn(np.repeat(pos[None, :], n, 0) + d * rng.uniform(0, 50, (n, 1)),
-                             d * rng.uniform(300, 950, (n, 1)) + vel,
-                             rng.uniform(0.35, 0.65, n), rng.uniform(170, 250, n), 360.0,
+            self.alpha.spawn(np.repeat(pos[None, :], n, 0) + d * rng.uniform(0, 50 * S, (n, 1)),
+                             d * rng.uniform(300 * S, 950 * S, (n, 1)) + vel,
+                             rng.uniform(0.35, 0.65, n), rng.uniform(170 * S, 250 * S, n), 360.0 * S,
                              np.array([1.0, 0.86, 0.45, 1.0], "f4"), np.array([1.0, 0.38, 0.06, 0.0], "f4"),
-                             drag=4.0, grav=-220.0)
+                             drag=4.0, grav=-220.0 * S)
             # 3) outer fire: orange -> deep red, a little longer
             n = 60
             d = self._rand_dirs(n); d[:, 2] = np.abs(d[:, 2]) * 0.9 + 0.1
-            self.alpha.spawn(np.repeat(pos[None, :], n, 0) + d * rng.uniform(20, 90, (n, 1)),
-                             d * rng.uniform(450, 1100, (n, 1)) + vel,
-                             rng.uniform(0.5, 0.9, n), rng.uniform(140, 200, n), 320.0,
+            self.alpha.spawn(np.repeat(pos[None, :], n, 0) + d * rng.uniform(20 * S, 90 * S, (n, 1)),
+                             d * rng.uniform(450 * S, 1100 * S, (n, 1)) + vel,
+                             rng.uniform(0.5, 0.9, n), rng.uniform(140 * S, 200 * S, n), 320.0 * S,
                              np.array([1.0, 0.55, 0.12, 0.9], "f4"), np.array([0.55, 0.10, 0.03, 0.0], "f4"),
-                             drag=3.5, grav=-180.0)
+                             drag=3.5, grav=-180.0 * S)
             # 4) embers: long-lived bright sparks that arc and fall
             n = 80
             d = self._rand_dirs(n); d[:, 2] = np.abs(d[:, 2]) * 1.2 + 0.2
-            self.add.spawn(np.repeat(pos[None, :], n, 0), d * rng.uniform(700, 2200, (n, 1)) + vel,
-                           rng.uniform(0.6, 1.4, n), rng.uniform(7, 13, n), 3.0,
+            self.add.spawn(np.repeat(pos[None, :], n, 0), d * rng.uniform(700 * S, 2200 * S, (n, 1)) + vel,
+                           rng.uniform(0.6, 1.4, n), rng.uniform(7 * S, 13 * S, n), 3.0 * S,
                            np.array([1, 0.92, 0.6, 1.0], "f4"), np.array([1, 0.35, 0.05, 0.0], "f4"),
-                           drag=0.9, grav=900.0)
+                           drag=0.9, grav=900.0 * S)
             # 5) debris chunks: dark bits of car flung out
             n = 18
             d = self._rand_dirs(n); d[:, 2] = np.abs(d[:, 2]) + 0.3
-            self.alpha.spawn(np.repeat(pos[None, :], n, 0), d * rng.uniform(600, 1500, (n, 1)) + vel,
-                             rng.uniform(0.7, 1.2, n), rng.uniform(16, 26, n), 12.0,
+            self.alpha.spawn(np.repeat(pos[None, :], n, 0), d * rng.uniform(600 * S, 1500 * S, (n, 1)) + vel,
+                             rng.uniform(0.7, 1.2, n), rng.uniform(16 * S, 26 * S, n), 12.0 * S,
                              np.array([0.10, 0.10, 0.11, 1.0], "f4"), np.array([0.08, 0.08, 0.09, 0.0], "f4"),
-                             drag=0.6, grav=1300.0)
+                             drag=0.6, grav=1300.0 * S)
             # 6) smoke: light grey, thin, rising and spreading, after the fire
             n = 28
             d = self._rand_dirs(n); d[:, 2] = np.abs(d[:, 2])
-            self.alpha.spawn(np.repeat(pos[None, :], n, 0) + d * 80, d * 220 + np.array([0, 0, 260], "f4"),
-                             rng.uniform(1.2, 2.0, n), 140.0, 420.0, np.array([0.50, 0.47, 0.45, 0.30], "f4"),
+            self.alpha.spawn(np.repeat(pos[None, :], n, 0) + d * 80 * S, d * 220 * S + np.array([0, 0, 260 * S], "f4"),
+                             rng.uniform(1.2, 2.0, n), 140.0 * S, 420.0 * S, np.array([0.50, 0.47, 0.45, 0.30], "f4"),
                              np.array([0.42, 0.42, 0.44, 0.0], "f4"), drag=1.6)
             # 7) shockwave rings (ground + vertical)
-            self.ring(pos, (0, 0, 1), 40.0, 760.0, 0.35, 0.07, (1.0, 0.65, 0.25, 0.9), core=(1.0, 0.95, 0.85))
-            self.ring(pos, (0, 1, 0), 40.0, 520.0, 0.28, 0.06, (1.0, 0.75, 0.35, 0.7), core=(1.0, 0.95, 0.85), billboard=True)
+            self.ring(pos, (0, 0, 1), 40.0 * S, 760.0 * S, 0.35, 0.07, (1.0, 0.65, 0.25, 0.9), core=(1.0, 0.95, 0.85))
+            self.ring(pos, (0, 1, 0), 40.0 * S, 520.0 * S, 0.28, 0.06, (1.0, 0.75, 0.35, 0.7), core=(1.0, 0.95, 0.85),
+                      billboard=True)
         elif k == "goal":
+            # GOAL_FX_SPEED: the goal explosion plays at 70% speed -- same shapes and extent, just slower
+            # (speeds and growth x0.7, lifetimes / 0.7, drag x0.7, gravity x0.7^2)
+            v = GOAL_FX_SPEED
             col = TEAM_GOAL[int(ev.get("team", 0)) & 1]
-            self.add.spawn(pos[None, :], np.zeros((1, 3), "f4"), np.array([0.35], "f4"), np.array([1500.0], "f4"),
-                           2600.0, np.array([*col, 1.0], "f4"), np.array([*col, 0.0], "f4"))
+            self.add.spawn(pos[None, :], np.zeros((1, 3), "f4"), np.array([0.35 / v], "f4"), np.array([1500.0], "f4"),
+                           2600.0 * v, np.array([*col, 1.0], "f4"), np.array([*col, 0.0], "f4"))
             n = 220
             d = self._rand_dirs(n)
-            self.add.spawn(np.repeat(pos[None, :], n, 0), d * self._rng.uniform(600, 2600, (n, 1)),
-                           self._rng.uniform(0.7, 1.8, n), self._rng.uniform(45, 110, n), 8.0,
-                           np.array([1, 1, 1, 1.0], "f4"), np.array([*col, 0.0], "f4"), drag=1.4, grav=300.0)
-            self.ring(pos, (0, 1, 0), 60.0, 1600.0, 0.7, 0.07, (*col, 1.0), core=(1, 1, 1))
-            self.ring(pos, (0, 0, 1), 60.0, 1300.0, 0.8, 0.05, (*col, 0.8), core=(1, 1, 1), delay=0.08)
+            self.add.spawn(np.repeat(pos[None, :], n, 0), d * self._rng.uniform(600 * v, 2600 * v, (n, 1)),
+                           self._rng.uniform(0.7 / v, 1.8 / v, n), self._rng.uniform(45, 110, n), 8.0 * v,
+                           np.array([1, 1, 1, 1.0], "f4"), np.array([*col, 0.0], "f4"), drag=1.4 * v, grav=300.0 * v * v)
+            self.ring(pos, (0, 1, 0), 60.0, 1600.0, 0.7 / v, 0.07, (*col, 1.0), core=(1, 1, 1))
+            self.ring(pos, (0, 0, 1), 60.0, 1300.0, 0.8 / v, 0.05, (*col, 0.8), core=(1, 1, 1), delay=0.08 / v)
 
     # ---------------------------------------------------------------------------------------- #
     def wheel_glow_for(self, idx, now):
