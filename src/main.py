@@ -1351,6 +1351,47 @@ class RSVRenderer:
         self.ctx.enable(moderngl.DEPTH_TEST)
         self.ctx.enable(moderngl.CULL_FACE)
 
+    # Supersonic speed lines (RL): thin white streaks in the air around and ahead of the spectated car, lying along
+    # its velocity, that it flies past -- in the 3D scene (so they sit in the picture and follow the car's direction
+    # in perspective), not 2D darts from the screen edges. Rare and faint.
+    SPEED_LINE_RATE = 7.0            # new lines per second at full supersonic
+
+    def _update_speed_lines(self, state, interp_ratio, spectated):
+        lines = self.__dict__.setdefault("_speed_lines", [])
+        now = time.time()
+        dt = max(0.0, min(0.1, now - getattr(self, "_sl_last", now)))
+        self._sl_last = now
+        if 0 <= spectated < len(state.car_states) and not state.car_states[spectated].is_demoed:
+            car = state.car_states[spectated]
+            v = np.asarray(tuple(car.phys.get_vel(interp_ratio)), "f8")
+            sp = float(np.linalg.norm(v))
+            if sp >= self.SUPERSONIC_SPEED:
+                act = min(1.0, (sp - self.SUPERSONIC_SPEED) / 200.0) * 0.5 + 0.5
+                self._sl_acc = getattr(self, "_sl_acc", 0.0) + dt * self.SPEED_LINE_RATE * act
+                vd = v / sp
+                pos = np.asarray(tuple(car.phys.get_pos(interp_ratio)), "f8")
+                a = np.cross(vd, (0.0, 0.0, 1.0))
+                a = a / np.linalg.norm(a) if np.linalg.norm(a) > 1e-3 else np.array([1.0, 0.0, 0.0])
+                b = np.cross(vd, a)
+                while self._sl_acc >= 1.0:
+                    self._sl_acc -= 1.0
+                    ang = random.uniform(0.0, 2.0 * math.pi)
+                    p = pos + vd * random.uniform(150.0, 900.0) + (a * math.cos(ang) + b * math.sin(ang)) * random.uniform(140.0, 460.0)
+                    if p[2] < 30.0:
+                        p[2] = random.uniform(40.0, 220.0)            # never under the floor
+                    lines.append((p, vd.copy(), random.uniform(220.0, 520.0), now, random.uniform(0.28, 0.45),
+                                  random.uniform(0.35, 0.55)))
+        keep = []
+        for ln in lines:
+            p, d, L, t0, life, a0 = ln
+            t = (now - t0) / life
+            if t >= 1.0:
+                continue
+            keep.append(ln)
+            env = math.sin(math.pi * t)
+            self.fx.add_beam(tuple(p), tuple(p - d * L), 3.2, 0.8, (1.0, 1.0, 1.0, a0 * env), (1.0, 1.0, 1.0, 0.0))
+        self._speed_lines = keep
+
     def _heading_point(self, vel, width, height):
         """Screen point the car is heading to (its velocity's vanishing point), or None (no speed / behind)."""
         vp, cam = getattr(self, "_frame_vp", None), getattr(self, "_frame_cam", None)
@@ -2291,6 +2332,7 @@ class RSVRenderer:
         cam_r = safe_normalize(Vector3(pyrr.vector3.cross(cam_f, Vector3((0.0, 0.0, 1.0)))))
         self.fx.cam_right = np.asarray(cam_r, "f4")
         self.fx.cam_up = np.asarray(pyrr.vector3.cross(cam_r, cam_f), "f4")
+        self._update_speed_lines(state, interp_ratio, spectated)
         self.fx.render(vp_bytes, px_scale, camera_pos)
 
         if PERF:
@@ -2500,10 +2542,6 @@ class RSVRenderer:
                 if speed >= self.SUPERSONIC_SPEED:
                     ss_target = float(np.clip((speed - self.SUPERSONIC_SPEED) / 200.0, 0.0, 1.0)) * 0.5 + 0.5
                 self.render_boost_hud(width, height, spectated_car.boost_amount, spectated_car.team_num)
-        foe = None
-        if spectated >= 0 and (ss_target > 0.0 or getattr(self, "_ss_activation", 0.0) > 0.01):
-            foe = self._heading_point(state.car_states[spectated].phys.get_vel(interp_ratio), width, height)
-        self.render_supersonic_streaks(width, height, ss_target, total_time, foe)
         self.render_pai_hud(width, height, getattr(state_manager, "gail_hud", None))
         self.render_scoreboard_hud(width, height, getattr(state_manager, "scoreboard", None))
         self.render_goal_banner(width, height, state)

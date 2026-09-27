@@ -236,21 +236,17 @@ class FX:
         self.cam_up = np.array([0.0, 0.0, 1.0], "f4")
 
     def pad_pickup(self, pos, big):
-        """Boost pad picked up: a warm flash where the orb was, a quick golden ring spreading over the floor and
-        a burst of sparks rising out of the pad. Small pads get the same, smaller."""
-        k = 1.0 if big else 0.55
-        rng = self._rng
-        base = np.asarray(pos, "f4").copy(); base[2] = 10.0
-        c = base.copy(); c[2] = 74.0 if big else 22.0
-        self.add.spawn(c[None, :], np.zeros((1, 3), "f4"), np.array([0.20], "f4"), np.array([230.0 * k], "f4"),
-                       90.0 * k, np.array([1.0, 0.86, 0.48, 0.95], "f4"), np.array([1.0, 0.50, 0.10, 0.0], "f4"))
-        self.ring(base, (0, 0, 1), 40.0 * k, 210.0 * k, 0.38, 0.10, (1.0, 0.62, 0.18, 0.9), core=(1.0, 0.95, 0.8))
-        n = 22 if big else 9
-        d = self._rand_dirs(n); d[:, 2] = np.abs(d[:, 2]) * 2.2 + 0.6
+        """Big boost pad picked up: a spray of golden sparks (no floor ring). Small pads get no pickup effect
+        (RL only flashes the big canisters)."""
+        if not big:
+            return
+        pos = np.asarray(pos, "f4").copy(); pos[2] = 40.0
+        n = 18
+        d = self._rand_dirs(n); d[:, 2] = np.abs(d[:, 2]) * 2.5 + 0.8
         d /= np.linalg.norm(d, axis=1, keepdims=True)
-        self.add.spawn(np.repeat(c[None, :], n, 0), d * rng.uniform(260.0, 720.0, (n, 1)) * (0.6 + 0.4 * k),
-                       rng.uniform(0.30, 0.60, n), rng.uniform(6.0, 11.0, n) * max(k, 0.7), 2.0,
-                       np.array([1.0, 0.88, 0.45, 1.0], "f4"), np.array([1.0, 0.40, 0.05, 0.0], "f4"), drag=2.5, grav=500.0)
+        self.add.spawn(np.repeat(pos[None, :], n, 0), d * self._rng.uniform(260, 650, (n, 1)),
+                       self._rng.uniform(0.30, 0.55, n), self._rng.uniform(8, 14, n), 2.0,
+                       np.array([1.0, 0.88, 0.45, 1.0], "f4"), np.array([1.0, 0.45, 0.05, 0.0], "f4"), drag=3.0, grav=400.0)
 
     def pad_charge(self, items):
         """items: [(x, y, z, radius, progress 0..1)] for every EMPTY pad -> recharge rings drawn this frame: a ring
