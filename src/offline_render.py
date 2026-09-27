@@ -550,7 +550,7 @@ class OfflineAudio(rl_audio.Audio):
             return a + (src[(k0 + 1) % len(src)] - a) * fr
 
         if "boost_loop" in self.files:
-            src = self._arr("boost_loop", 0)
+            src = rl_audio.seamless_loop(self._arr("boost_loop", 0), int(0.04 * SAMPLE_RATE))
             for st in self.loops:
                 env = st["env"]
                 t_a = st["t0"]

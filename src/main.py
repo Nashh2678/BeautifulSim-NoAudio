@@ -2288,9 +2288,10 @@ class RSVRenderer:
     # while the ball moves faster than 75 kph; a round tube, each point fading out over 600 ms, white for the
     # first 50 uu past the ball's surface. Once the ball slows under 75 kph the trail keeps being emitted for
     # 600 ms with a strength going 1 -> 0 (a reverse fade), so it tapers off instead of stopping dead.
-    BALL_TRAIL_SPEED = 75.0 / 0.036                           # 75 kph in uu/s (1 uu = 1 cm)
-    BALL_TRAIL_TAIL = 0.60           # after the ball drops under 75 kph it keeps emitting, fainter and fainter
-    BALL_TRAIL_LIFE = 0.60
+    BALL_TRAIL_SPEED = 82.0 / 0.036                           # 82 kph in uu/s (1 uu = 1 cm)
+    BALL_TRAIL_TAIL = 0.60           # after the ball drops under 82 kph it keeps emitting, fainter and fainter
+    BALL_TRAIL_LIFE = 1.00
+    BALL_TRAIL_RADIUS = 21.0
     # 70% of the previous saturation ((0.30, 0.45, 1.0) / (1.0, 0.52, 0.12)): 70% of the way from grey, same luminance
     TEAM_TRAIL = ((0.347, 0.452, 0.837), (0.878, 0.542, 0.262))
 
@@ -2338,7 +2339,7 @@ class RSVRenderer:
         if len(self.ball_trail.points) > 1 and team is not None:
             self._trail_team = int(team) & 1
         if len(self.ball_trail.points) > 1:
-            self.fx.add_tube(self.ball_trail, self.BALL_TRAIL_LIFE, 14.0,
+            self.fx.add_tube(self.ball_trail, self.BALL_TRAIL_LIFE, self.BALL_TRAIL_RADIUS,
                              (*self.TEAM_TRAIL[getattr(self, "_trail_team", 0)], 0.55),
                              white_from=91.25, white_len=50.0)
 

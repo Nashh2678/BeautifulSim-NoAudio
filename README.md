@@ -87,7 +87,7 @@ there are git-ignored, so they never get committed by accident.
 - **Cars and ball**: team-painted cars, a two-seam ball that darkens as it crosses the goal line, boost pads that
   fade back in while recharging.
 - **Ball trail**: like Rocket League, a round tube in the colour of the last team to touch the ball, shown above
-  75 kph, white right behind the ball, soft at the edges and fading out over 600 ms.
+  82 kph, white right behind the ball, soft at the edges and fading out over 1 s.
 - **Effects**: boost flames, supersonic trails, jump and flip flashes, sparks where a car's body (not its wheels)
   hits the ball, the arena or another car, faint streaks from the car's corners while it flips, demolition
   explosions, goal bursts, boost pad

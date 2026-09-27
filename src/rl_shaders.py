@@ -684,8 +684,9 @@ void main() {
         f_color = vec4(mix(color.rgb, coreCol, rim) * a, a);
         return;
     }
-    if (mode > 1.5) {                                   // jump glow: bright out to ~half, soft edge
-        float g = 1.0 - smoothstep(0.40, 1.0, r);
+    if (mode > 1.5) {                                   // jump glow: flat = bright out to ~half, soft edge;
+        float g = fill > 0.5 ? pow(1.0 - r, 1.6)        // fill=1: soft ball of light, hot core
+                             : 1.0 - smoothstep(0.40, 1.0, r);
         float a = color.a * g;
         f_color = vec4(mix(color.rgb, coreCol, pow(1.0 - r, 3.0)) * a, a);
         return;

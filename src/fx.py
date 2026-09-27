@@ -27,7 +27,7 @@ GOAL_FX_SPEED = 0.7       # goal explosion playback speed
 RESET_DISC_RADIUS = 59.0
 RESET_DISC_FWD = 9.0
 RESET_DISC_BELOW = 14.0
-JUMP_GLOW_LIFE = 0.15        # jump / flip glow
+JUMP_GLOW_LIFE = 0.12        # jump / flip glow
 RESET_DISC_LIFE = 0.12
 
 TRAIL_VERT = """
@@ -467,13 +467,20 @@ class FX:
                 self.reset_discs = [d for d in self.reset_discs if d["car"] != car]
                 self.reset_discs.append({"car": car, "age": 0.0, "drawn": 0})
         elif k in ("jump", "doublejump", "dodge"):
-            # RL jump burst (jumps, double jumps and flips; not stalls): a warm red-orange glow in the
-            # wheel plane at the take-off point, a bit wider than the car so its edge shows around the body
-            # and it opens up as the car leaves. Full size at once, 150 ms (holds, then fades out).
+            # RL jump burst (jumps, double jumps and flips; not stalls), 120 ms, full size at once, holds then
+            # fades. Off a surface: a flat warm glow in the wheel plane at the take-off point, wider than the
+            # car so it shows around the body and opens up as the car leaves. In the air (double jump / flip):
+            # a soft camera-facing orange ball of light just under the car, hot in the middle (fill=1 selects
+            # that profile in the shader), partly hidden by the car like RL's.
             up = np.asarray(ev.get("up", (0, 0, 1)), "f4")
-            c = pos - up * RESET_DISC_BELOW                      # wheel-bottom level: just above the floor
-            self.ring(c, up, 80.0, 80.0, JUMP_GLOW_LIFE, 0.0, (1.0, 0.32, 0.07, 0.95), core=(1.0, 0.72, 0.38),
-                      mode=2)
+            if k == "jump":
+                c = pos - up * RESET_DISC_BELOW                  # wheel-bottom level: just above the surface
+                self.ring(c, up, 80.0, 80.0, JUMP_GLOW_LIFE, 0.0, (1.0, 0.32, 0.07, 0.95),
+                          core=(1.0, 0.72, 0.38), mode=2)
+            else:
+                c = pos - up * 24.0
+                self.ring(c, up, 62.0, 62.0, JUMP_GLOW_LIFE, 0.0, (1.0, 0.36, 0.08, 1.0),
+                          core=(1.0, 0.80, 0.45), mode=2, billboard=True, fill=1.0)
         elif k == "demo":
             # DEMO_SCALE: the whole explosion 20% bigger (sizes, spread speeds, offsets, gravity, ring radii);
             # same timing, same look
@@ -540,25 +547,22 @@ class FX:
             self.ring(pos, (0, 0, 1), 60.0, 1300.0, 0.8 / v, 0.05, (*col, 0.8), core=(1, 1, 1), delay=0.08 / v)
 
     def sparks(self, pos, normal, strength):
-        """Metal-on-metal sparks where the car BODY touched something (ball, arena, another car): a short
-        white-yellow flash and a spray of hot specks thrown out along the surface, falling and cooling to
-        orange. Size / count / speed scale with the impact strength (uu/s)."""
+        """Sparks where the car BODY touched something (ball, arena, another car): 2-4 small orange specks
+        thrown out along the surface, falling and cooling to red. Count / speed scale with the impact."""
         rng = self._rng
         pos = np.asarray(pos, "f4")
         nrm = np.asarray(normal, "f4")
         ln = float(np.linalg.norm(nrm))
         nrm = nrm / ln if ln > 1e-4 else np.array([0, 0, 1], "f4")
-        s = float(np.clip((strength - 100.0) / 1400.0, 0.15, 1.0))
-        self.add.spawn(pos[None, :], np.zeros((1, 3), "f4"), np.array([0.07], "f4"), np.array([40.0 + 50.0 * s], "f4"),
-                       300.0, np.array([1.0, 0.93, 0.75, 0.8], "f4"), np.array([1.0, 0.55, 0.2, 0.0], "f4"))
-        n = int(14 + 34 * s)
+        s = float(np.clip((strength - 100.0) / 1400.0, 0.0, 1.0))
+        n = 2 + int(round(2 * s))                            # 2-4 small specks, subtle
         d = self._rand_dirs(n)
         d -= nrm[None, :] * (d @ nrm)[:, None] * 0.7        # mostly along the surface...
         d += nrm[None, :] * 0.45                             # ...and away from it
         d /= np.linalg.norm(d, axis=1, keepdims=True) + 1e-6
-        self.add.spawn(np.repeat(pos[None, :], n, 0), d * rng.uniform(450.0, 1500.0, (n, 1)) * (0.6 + 0.6 * s),
-                       rng.uniform(0.18, 0.50, n), rng.uniform(7.0, 12.0, n), 2.0,
-                       np.array([1.0, 0.90, 0.55, 1.0], "f4"), np.array([1.0, 0.38, 0.04, 0.0], "f4"),
+        self.add.spawn(np.repeat(pos[None, :], n, 0), d * rng.uniform(350.0, 900.0, (n, 1)) * (0.7 + 0.5 * s),
+                       rng.uniform(0.15, 0.35, n), rng.uniform(3.0, 4.5, n), 1.0,
+                       np.array([1.0, 0.45, 0.10, 0.9], "f4"), np.array([0.85, 0.12, 0.03, 0.0], "f4"),
                        drag=1.6, grav=1100.0)
 
     # ---------------------------------------------------------------------------------------- #

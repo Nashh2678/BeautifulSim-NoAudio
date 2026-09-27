@@ -251,6 +251,19 @@ def goal_frame_distance(p):
     return min(post, bar)
 
 
+def bounce_goal_frame_distance(pa, va, pb, vb, dt, steps=8):
+    """Closest approach to the goal frame around a bounce between two packets dt apart: along the straight
+    chord AND along the two velocity rays (forward from the previous packet, backward from this one). A fast
+    ball bounces between packets, so the chord cuts the corner and misses the post it actually hit."""
+    d = swept_goal_frame_distance(pa, pb, steps)
+    if 0.0 < dt < 0.2:
+        for k in range(1, steps + 1):
+            f = dt * k / steps
+            d = min(d, goal_frame_distance((pa[0] + va[0] * f, pa[1] + va[1] * f, pa[2] + va[2] * f)),
+                    goal_frame_distance((pb[0] - vb[0] * f, pb[1] - vb[1] * f, pb[2] - vb[2] * f)))
+    return d
+
+
 def swept_goal_frame_distance(a, b, steps=8):
     """Closest approach of the ball centre to the goal frame between two packets (a 2000 uu/s ball moves
     ~65 uu per 30 Hz packet, so the packet positions alone can straddle the actual contact)."""
@@ -352,6 +365,8 @@ class EventDetector:
 
         pc, pb = self.prev_cars, self.prev_ball
         self.prev_cars, self.prev_ball = cars, (bpos, bvel)
+        prev_t, self._prev_t = getattr(self, "_prev_t", t), t
+        self._prev_t_last = prev_t
         prev_pads, self.prev_pads = self.prev_pads, (list(pads) if pads is not None else None)
         if pc is None or pb is None or len(pc) != len(cars):
             return
@@ -380,7 +395,7 @@ class EventDetector:
             self._emit(t, "ball_hit", bpos, car=i, team=cars[i].team, strength=dvb_mag, contact=contact,
                        underside=under)
         elif dvb_mag > 300.0:
-            if swept_goal_frame_distance(pb[0], bpos) < POST_CONTACT:
+            if bounce_goal_frame_distance(pb[0], pb[1], bpos, bvel, t - self._prev_t_last) < POST_CONTACT:
                 surf = "post"                               # goal post OR crossbar clang
             elif bpos[2] < 180.0:
                 surf = "floor"

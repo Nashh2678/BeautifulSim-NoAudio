@@ -51,6 +51,19 @@ def _save_settings(d):
         pass
 
 
+def seamless_loop(x, n):
+    """Boost loop wrap-around: the decoded .wem's last and first samples don't meet (a click at every loop,
+    so up to ~1/s with the speed pitch). Equal-power crossfade of the last n samples into the first n, the loop
+    gets n samples shorter and joins without a jump. x: (samples, channels) float array."""
+    import numpy as np
+    if len(x) <= 4 * n:
+        return x
+    a = np.linspace(0.0, np.pi / 2, n, dtype="f8")[:, None]
+    body = x[n:len(x) - n]
+    join = x[len(x) - n:] * np.cos(a) + x[:n] * np.sin(a)
+    return np.ascontiguousarray(np.concatenate([body, join.astype(x.dtype)], 0))
+
+
 class Audio:
     NUM_CHANNELS = 64
     LOOP_CHANNELS = 8           # boost loops (one per car)
@@ -125,7 +138,7 @@ class Audio:
             self._boost_variants = []
             if "boost_loop" in sounds:
                 # boost loop pre-pitched for the other cars (the local one is pitched continuously)
-                loop = pygame.sndarray.array(sounds["boost_loop"][0]).astype("f4")
+                loop = seamless_loop(pygame.sndarray.array(sounds["boost_loop"][0]).astype("f4"), int(0.04 * sr))
                 for cents in self.BOOST_PITCH_STEPS:
                     r = 2.0 ** (cents / 1200.0)
                     t = np.arange(int(len(loop) / r)) * r
@@ -270,6 +283,7 @@ class Audio:
                 self.stop_all()
             return
         now = time.time()
+        local_on = False
         for key, val in boosting.items():
             pos, local = val[0], val[1]
             speed = val[2] if len(val) > 2 else 0.0
@@ -277,6 +291,13 @@ class Audio:
             if st is None:
                 st = self._boost[key] = {"t0": now, "ch": None,
                                          "start_ch": self.play("boost_start", pos, 0.9, local)}
+            if local and st["ch"] is not None:
+                # this car just became the spectated one mid-boost: its loop moves to the synth stream (two
+                # copies of the same loop at an offset phase against each other -> the "bubbling")
+                st["ch"].fadeout(60)
+                self._loop_free.append(st["ch"])
+                st["ch"] = None
+            local_on = local_on or local
             if (st["ch"] is None and not local and now - st["t0"] >= self.BOOST_LOOP_DELAY and self._loop_free
                     and self._boost_variants):
                 k = min(range(len(self.BOOST_PITCH_STEPS)),
@@ -289,6 +310,10 @@ class Audio:
             if local and self._stream is not None:
                 self._stream.set_boost(now - st["t0"] >= self.BOOST_LOOP_DELAY, min(1.0, l), min(1.0, r), speed)
             st["pos"], st["local"] = pos, local
+        if not local_on and self._stream is not None:
+            # nobody spectated is boosting (released, or the camera moved to another car mid-boost): the
+            # stream's loop must stop -- it used to stay stuck on under the new car's own loop
+            self._stream.set_boost(False, 0.0, 0.0, 0.0)
         for key in [k for k in self._boost if k not in boosting]:
             st = self._boost.pop(key)
             if st.get("ch") is not None:
