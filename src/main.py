@@ -2080,9 +2080,9 @@ class RSVRenderer:
             pp["Texture"].value = 0
             pp["ghost"].value = 0.0
             self.render_target.use()
-            # Recharge (RL): the empty pad's rim ring lights up as it recharges (the lit arc sweeps round, deep red
-            # -> gold, so you can see how long is left) and in the last ~1 s the orb fades back in as a whitish
-            # glass sphere before it pops back gold.
+            # Recharge (RL): the empty pad's base stays black for the first half, then whitens from the edge in
+            # (PAD_FRAG `charge`), and in the last ~1 s the orb fades back in as a whitish glass sphere before it
+            # pops back gold.
             ghosts, charge, glows = [], [], []
             for i in range(n_p):
                 is_big, mat = cache[i]
@@ -2092,22 +2092,22 @@ class RSVRenderer:
                     st_ = self._pad_spawn_t[i]
                     pp["flash"].value = max(0.0, 1.0 - (now_p - st_) / 0.35) if st_ is not None else 0.0
                     pp["pulse"].value = math.sin(now_p * 3.0 + i * 1.7)
+                    pp["charge"].value = -1.0
                     self.pad_vaos_rl[self._pad_vaos[2 * is_big + 1]].render(moderngl.TRIANGLES)
                     glows.append((x_, y_, is_big, True, 1.0))
                 else:
                     pp["flash"].value = 0.0
-                    self.pad_vaos_rl[self._pad_vaos[2 * is_big]].render(moderngl.TRIANGLES)
                     pt = self._pad_pick_t[i]
                     dur = self.PAD_RESPAWN_BIG if is_big else self.PAD_RESPAWN_SMALL
-                    prog = 0.0 if pt is None else min(1.0, (now_p - pt) / dur)     # unknown start: dim ring
-                    charge.append((x_, y_, 8.9 if is_big else 8.4, 94.0 if is_big else 51.5, prog))
-                    glows.append((x_, y_, is_big, False, prog))
+                    prog = 0.0 if pt is None else min(1.0, (now_p - pt) / dur)     # unknown start: stays black
+                    pp["charge"].value = prog
+                    pp["padR"].value = 37.8 if is_big else 20.8
+                    self.pad_vaos_rl[self._pad_vaos[2 * is_big]].render(moderngl.TRIANGLES)
                     if pt is not None:
                         g_win = 1.2 if is_big else 0.7
                         left = dur - (now_p - pt)
                         if left < g_win:
                             ghosts.append((mat, is_big, 1.0 - max(0.0, left) / g_win))
-            self.fx.pad_charge(charge)
             self.fx.pad_glows(glows, now_p)
             self._pad_ghosts = ghosts            # translucent: drawn after the sky (see _render_pad_ghosts)
         if PERF:

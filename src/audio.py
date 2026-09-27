@@ -368,7 +368,7 @@ class _SilentSynth:
 class EngineStream:
     """Streams the synthesized engine (+ the local car's boost loop) to one mixer channel in short
     blocks from a feeder thread, so pitch and level glide continuously with RPM and speed."""
-    BLOCK = 3600                     # 75 ms at 48 kHz; one block queued ahead (margin vs GIL stalls)
+    BLOCK = 4800                     # 100 ms at 48 kHz; one block queued ahead (margin vs GIL stalls)
     FADE_IN = 480                    # 10 ms fade-in after a dropout: resuming mid-waveform made a deep "tick"
 
     def __init__(self, pygame, channel, sr, synth, model, boost_loop):
@@ -389,6 +389,8 @@ class EngineStream:
         self._boost = (False, 0.0, 0.0, 0.0)
         self._b_phase = 0.0
         self._b_last = (0.0, 0.0, 1.0)
+        self.underruns = 0           # feeder starvations (each one cuts the sound -> a click); logged
+        self._started = False
         self._running = False
         self._t = threading.Thread(target=self._loop, name="rsv-engine-stream", daemon=True)
         self._t.start()
@@ -407,9 +409,16 @@ class EngineStream:
         with self._chlock:
             with self._lock:
                 self._running = False
+                self._started = False        # a deliberate stop is not an underrun
                 self._eng = None
                 self._boost = (False, 0.0, 0.0, 0.0)
             try:
+                # The block already QUEUED would start right after the fade-out, at full volume, and be cut dead
+                # 100 ms later -- the random "tick" (every focus loss / mute). Replace it with silence first.
+                if self.ch.get_queue() is not None:
+                    if getattr(self, "_silence", None) is None:
+                        self._silence = self.pg.sndarray.make_sound(self.np.zeros((64, 2), "<i2"))
+                    self.ch.queue(self._silence)
                 self.ch.fadeout(30)                   # a hard stop mid-waveform clicks
             except Exception:
                 pass
@@ -460,6 +469,11 @@ class EngineStream:
                         out = self.render_block(self.BLOCK, eng, boost)
                         if not self.ch.get_busy():            # the channel ran dry (feeder starved): fade in
                             out[:self.FADE_IN] *= np.linspace(0.0, 1.0, self.FADE_IN, dtype="f4")[:, None]
+                            if self._started:
+                                self.underruns += 1                   # the cut before this gap is audible
+                                if self.underruns <= 5 or self.underruns % 50 == 0:
+                                    print("[audio] engine stream underrun #{}".format(self.underruns))
+                            self._started = True
                         snd = self.pg.sndarray.make_sound(
                             np.ascontiguousarray((np.clip(out, -1.0, 1.0) * 32767.0).astype("<i2")))
                         if self.ch.get_busy():

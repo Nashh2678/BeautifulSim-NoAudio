@@ -838,10 +838,12 @@ out vec3 v_pos;
 out vec3 v_nrm;
 out vec2 v_uv;
 out float v_oz;
+out vec2 v_oxy;
 void main() {
     vec4 wp = m_model * vec4(in_position, 1.0);
     v_pos = wp.xyz;
     v_oz = in_position.z;
+    v_oxy = in_position.xy;
     v_nrm = normalize(mat3(m_model) * in_normal);
     v_uv = in_texcoord_0;
     gl_Position = m_vp * wp;
@@ -857,10 +859,13 @@ uniform float ghost;       // >0: returning-orb pass (alpha blended), value = it
 uniform float orbZ;        // object-space z where the big pad's orb starts (the gold cone below is skipped)
 uniform float flash;       // 0..1 just-respawned flash
 uniform float pulse;
+uniform float charge;      // empty pad: recharge progress 0..1 (-1 = not an empty-pad draw)
+uniform float padR;        // pad radius in object space (the base's outer edge)
 in vec3 v_pos;
 in vec3 v_nrm;
 in vec2 v_uv;
 in float v_oz;
+in vec2 v_oxy;
 out vec4 f_color;
 void main() {
     vec3 tex = texture(Texture, v_uv).rgb;
@@ -892,6 +897,16 @@ void main() {
         float ndl = max(dot(n, SUN_DIR), 0.0);
         vec3 amb = mix(vec3(0.08), vec3(0.35, 0.34, 0.38), n.z * 0.5 + 0.5);
         c = tex * 0.7 * (amb * 1.3 + SUN_COL * ndl * 0.8);
+        if (charge >= 0.0) {
+            // Empty pad (RL): the base stays black for the first half of the recharge, then turns white, the
+            // white spreading from the outer edge in to the centre (soft gradient) until the orb is back.
+            float p = clamp((charge - 0.5) / 0.5, 0.0, 1.0);
+            float rn = length(v_oxy) / padR;
+            float front = 1.05 - 1.1 * p;                      // edge -> centre, reaching it just before the end
+            float w = smoothstep(front - 0.30, front + 0.08, rn) * (0.30 + 0.70 * p) * smoothstep(0.0, 0.10, p);
+            w *= smoothstep(0.2, 0.6, n.z);                    // the top surfaces only
+            c = mix(c * 0.25, vec3(0.93, 0.94, 0.96) * (0.75 + 0.35 * ndl), w);
+        }
     }
     f_color = vec4(to_srgb(c), 1.0);
 }

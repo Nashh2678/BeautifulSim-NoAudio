@@ -502,7 +502,9 @@ class EventDetector:
                 if d_srf < BODY_NEAR:
                     n = arena_normal(c.pos)
                     vin_p, vin_c = -_dot(p.vel, n), -_dot(c.vel, n)
-                    wheels_down = _dot(p.up, n) > 0.7     # tilted < 45 deg before the hit: a wheel landing
+                    # tilted < ~70 deg before the hit: the wheels touch first -> a landing, not a body hit. (Was
+                    # 45 deg: tilted wheel landings at 45-50 deg played the body thud on top of the landing sound.)
+                    wheels_down = _dot(p.up, n) > 0.35
                     if vin_p > BODY_MIN_DV and vin_p - vin_c > BODY_MIN_DV and not wheels_down:
                         self._body_cool[i] = t + 0.3
                         self_impulse.add(i)
