@@ -224,6 +224,26 @@ def _fillet(h, v, r):
     return min(h, v)
 
 
+def heading_into_goal(p, v, team, horizon=1.6, dt=1.0 / 60.0):
+    """Would a free ball (gravity, floor bounces, side-wall bounces) cross `team`'s goal line inside the mouth
+    within `horizon` s? Blue (0) defends -y, orange (1) +y."""
+    sgn = -1.0 if (int(team) & 1) == 0 else 1.0
+    x, y, z = p
+    vx, vy, vz = v
+    if vy * sgn <= 0.0:
+        return False
+    for _ in range(int(horizon / dt)):
+        vz -= 650.0 * dt
+        x += vx * dt; y += vy * dt; z += vz * dt
+        if z < 91.25 and vz < 0.0:
+            z, vz = 91.25, -vz * 0.6
+        if abs(x) > 4096.0 - 91.25:
+            vx = -vx
+        if y * sgn >= 5124.25:                                   # reaches the goal line: inside the mouth?
+            return abs(x) < 893.0 - 30.0 and z < 642.775 - 30.0
+    return False
+
+
 def arena_distance(p):
     x, y, z = abs(p[0]), abs(p[1]), p[2]
     h = min(4096.0 - x, (8064.0 - x - y) * 0.70710678)
@@ -338,6 +358,7 @@ class EventDetector:
         self._body_cool = {}
         self.last_touch_team = None     # team of the last car to touch the ball (ball trail colour)
         self._goal_cool_until = 0.0
+        self._save_cool_until = 0.0
 
     def reset(self):
         self.prev_cars = None
@@ -394,6 +415,12 @@ class EventDetector:
             contact, under = box_contact(cars[i], bpos)
             self._emit(t, "ball_hit", bpos, car=i, team=cars[i].team, strength=dvb_mag, contact=contact,
                        underside=under)
+            # a save: the defending team touched a ball that was going in, and now it isn't
+            tm = int(cars[i].team) & 1
+            if (t >= self._save_cool_until and heading_into_goal(pb[0], pb[1], tm)
+                    and not heading_into_goal(bpos, bvel, tm)):
+                self._save_cool_until = t + 1.5
+                self._emit(t, "save", bpos, car=i, team=tm)
         elif dvb_mag > 300.0:
             if bounce_goal_frame_distance(pb[0], pb[1], bpos, bvel, t - self._prev_t_last) < POST_CONTACT:
                 surf = "post"                               # goal post OR crossbar clang

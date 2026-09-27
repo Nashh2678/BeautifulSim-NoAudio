@@ -40,6 +40,7 @@ import fx as rl_fx
 import rl_shaders
 import carrig
 import landscape
+import maps as rl_maps
 
 import moderngl
 import moderngl_window
@@ -164,6 +165,29 @@ def _octane_from_obj(obj_path, tex_path):
     out["wheel_centers"] = np.array([[51.2, -25.0, -3.3], [51.2, 24.8, -4.0], [-33.7, -28.1, -1.8], [-33.8, 27.7, -2.6]], "f4")
     out["wheel_radius"] = np.array([12.5, 12.5, 15.0, 15.0], "f4")
     return out
+
+
+def _read_settings():
+    import json as _json
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "rsv_settings.json"), "r", encoding="utf-8") as f:
+            return _json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_settings(d):
+    """Merge d into rsv_settings.json (atomic replace)."""
+    import json as _json
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rsv_settings.json")
+    cur = _read_settings()
+    cur.update(d)
+    try:
+        with open(path + ".tmp", "w", encoding="utf-8") as f:
+            _json.dump(cur, f, indent=1)
+        os.replace(path + ".tmp", path)
+    except OSError:
+        pass
 
 
 class RSVRenderer:
@@ -387,6 +411,73 @@ class RSVRenderer:
             wpx = (cap * 0.8) / cap_frac * aspect * (1.0 - 2.0 * pad_frac / aspect)
             self._draw_label(pct, m + pw - 18.0 * s - wpx, cy - cap * 0.4, cap * 0.8, (1.0, 1.0, 1.0, 0.75 * a), ortho)
         self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
+
+    MAP_KEYS = {Qt.Key_Up: "valley", Qt.Key_Left: "temple", Qt.Key_Right: "paris", Qt.Key_Down: "space"}
+
+    def _theme_programs(self):
+        return (self.prog_rl_arena, self.prog_car, self.prog_ball, self.prog_sky, self.prog_stadium, self.prog_pad,
+                self.prog_scene, self.prog_crowd)
+
+    def set_map(self, name, save=True):
+        """Switch the scenery, sky, light and field style (maps.py). Builds the map's mesh the first time (cached
+        on disk afterwards) and remembers the choice in rsv_settings.json."""
+        th = rl_maps.THEMES[name]
+        self.map_name = name
+        mid = rl_maps.MAP_ID[name]
+        for prog in self._theme_programs():
+            for key, val in (("uSunDir", th["sun_dir"]), ("uSunCol", th["sun_col"]), ("uSkyZen", th["zen"]),
+                             ("uSkyMid", th["mid"]), ("uSkyHor", th["hor"]), ("uSunGlow", th["glow"]),
+                             ("uSkyGround", th["ground"]), ("uAmb", th["amb"]), ("haze", th["haze"])):
+                if key in prog:
+                    prog[key].value = tuple(val)
+        self.prog_rl_arena["mapId"].value = mid
+        self.prog_rl_arena["grassCol"].value = tuple(th["grass"])
+        self.prog_rl_arena["glassK"].value = float(th.get("glass", 1.0))
+        self.prog_sky["mapId"].value = mid
+        self.prog_sky["cloudA"].value = tuple(th["cloudA"])
+        self.prog_sky["cloudB"].value = tuple(th["cloudB"])
+        if name != "valley" and name not in self._scenes:
+            mesh, crowd = rl_maps.load_or_build(name, DATA_DIR_PATH)
+            vao = self.ctx.vertex_array(self.prog_scene, [(self.ctx.buffer(mesh.tobytes()), "3f 3f 2f",
+                                                           "in_position", "in_col", "in_ek")])
+            cvao = None
+            if len(crowd):
+                cvao = self.ctx.vertex_array(self.prog_crowd, [
+                    (self.egg_vbo, "3f 3f", "in_position", "in_normal"),
+                    (self.ctx.buffer(crowd.tobytes()), "3f 3f 2f/i", "i_pos", "i_col", "i_ps")])
+            self._scenes[name] = (vao, len(mesh), cvao, len(crowd))
+        if save:
+            _write_settings({"map": name})
+        print("[map] {}".format(rl_maps.TITLE[name]), flush=True)
+
+    def _cheer_level(self):
+        """Crowd excitement after a goal / save: up in 0.15 s, held ~2.5 s, eased out by ~4.5 s."""
+        dt = time.time() - self._cheer_t
+        if dt < 0.0 or dt > 4.5:
+            return 0.0
+        return min(1.0, dt / 0.15) * (1.0 - max(0.0, (dt - 2.5) / 2.0) ** 2)
+
+    def _render_scenery(self, vp_bytes, cam_bytes, tnow):
+        if self.map_name == "valley":
+            self.prog_stadium["m_vp"].write(vp_bytes)
+            self.prog_stadium["camPos"].write(cam_bytes)
+            if "stadium" not in _SKIP:
+                self.stadium_vao.render(moderngl.TRIANGLES, vertices=self.stadium_n)
+            return
+        vao, n, cvao, n_eggs = self._scenes[self.map_name]
+        ps = self.prog_scene
+        ps["m_vp"].write(vp_bytes)
+        ps["camPos"].write(cam_bytes)
+        ps["time"].value = tnow
+        if "stadium" not in _SKIP:
+            vao.render(moderngl.TRIANGLES, vertices=n)
+        if cvao is not None and "crowd" not in _SKIP:
+            pc = self.prog_crowd
+            pc["m_vp"].write(vp_bytes)
+            pc["camPos"].write(cam_bytes)
+            pc["time"].value = tnow
+            pc["cheer"].value = self._cheer_level()
+            cvao.render(moderngl.TRIANGLES, instances=n_eggs)
 
     def _render_pad_ghosts(self, vp_bytes, cam_bytes):
         """The returning orbs of recharging pads. Translucent, so drawn AFTER the sky: drawn with the pads, the sky
@@ -686,6 +777,15 @@ class RSVRenderer:
         self._pad_prev = None
         self._pad_pick_t = []
         self._pad_spawn_t = []
+
+        # Maps (maps.py): scenery + crowd per map, switched live with the arrow keys; the last one is remembered
+        self.prog_scene = self.ctx.program(vertex_shader=rl_shaders.SCENE_VERT, fragment_shader=rl_shaders.SCENE_FRAG)
+        self.prog_crowd = self.ctx.program(vertex_shader=rl_shaders.CROWD_VERT, fragment_shader=rl_shaders.CROWD_FRAG)
+        self.egg_vbo = self.ctx.buffer(rl_maps.egg_mesh().tobytes())
+        self._scenes = {}
+        self._cheer_t = -1e9
+        saved_map = _read_settings().get("map", "valley")
+        self.set_map(saved_map if saved_map in rl_maps.ORDER else "valley", save=False)
 
         # Boost meter: analytic gauge + font atlas digits
         self.prog_gauge = self.ctx.program(vertex_shader=rl_shaders.GAUGE_VERT, fragment_shader=rl_shaders.GAUGE_FRAG)
@@ -2335,10 +2435,7 @@ class RSVRenderer:
         # Draw order is for overdraw: everything opaque first, so the depth test rejects the hidden
         # parts of the stadium and the sky only shades the pixels nothing else covered.
         self.ctx.disable(moderngl.CULL_FACE)
-        self.prog_stadium["m_vp"].write(vp_bytes)
-        self.prog_stadium["camPos"].write(cam_bytes)
-        if "stadium" not in _SKIP:
-            self.stadium_vao.render(moderngl.TRIANGLES, vertices=self.stadium_n)
+        self._render_scenery(vp_bytes, cam_bytes, tnow)
         self.ctx.fbo.depth_mask = False
         self.prog_sky["invVP"].write(np.linalg.inv(vp.reshape(4, 4).astype("f8")).astype("f4").tobytes())
         self.prog_sky["time"].value = tnow
@@ -2590,7 +2687,10 @@ class RSVRenderer:
             if local:                                  # RL only plays pickups for your own car
                 # big pad = Play_Boost_Pickup_Pad_Local, small pad = Play_Boost_Pickup_Pill_Local
                 a.play("pad_pickup" if ev.get("big") else "pad_pickup_small", pos, 0.9, True)
+        elif k == "save":
+            self._cheer_t = time.time()                    # the crowd jumps on its seats
         elif k == "goal":
+            self._cheer_t = time.time()
             self._goal_banner = (int(ev.get("team", 0)) & 1, time.time())
             a.play("goal_explosion_default", pos, 1.0, True)
             a.play("goal_explosion", pos, 0.8, True)             # the goal event layer on top
@@ -2624,6 +2724,7 @@ class RSVRenderer:
 
         ui_text = ""
         ui_text += "Render FPS: {}".format(self.last_fps) + "\n"
+        ui_text += "Map: {} (arrow keys)".format(rl_maps.TITLE.get(self.map_name, self.map_name)) + "\n"
         ui_text += "GPU: {}".format(self.gpu_name) + "\n"
         ui_text += "Connected: {}".format(state.recv_time > 0) + "\n"
         if state.recv_interval > 0:
@@ -2774,6 +2875,11 @@ class RSVRenderer:
             return
 
         # Switch to player closest to ball
+        if event.key() in self.MAP_KEYS and not event.isAutoRepeat():
+            name = self.MAP_KEYS[event.key()]
+            if name != self.map_name:
+                self.set_map(name)
+            return
         if event.key() == Qt.Key_P:
             if not (self.prev_state is None):
                 closest_idx = -1

@@ -71,3 +71,5 @@ data/sounds/*.wav
 data/sounds/*.mp3
 data/sounds/*.flac
 data/sounds/engine_src/
+# per-map scenery meshes (maps.py), rebuilt on demand
+data/scene_*_cache.npz

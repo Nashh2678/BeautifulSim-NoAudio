@@ -14,8 +14,17 @@ All lighting is done in linear space and written out through the same gamma curv
 """
 
 COMMON = '''
-const vec3 SUN_DIR = normalize(vec3(-0.45, 0.75, 0.30));   // low evening sun
-const vec3 SUN_COL = vec3(1.00, 0.88, 0.72);
+// Per-map light and sky (maps.py THEMES; the valley's values are the original evening constants).
+uniform vec3 uSunDir;      // normalised
+uniform vec3 uSunCol;
+uniform vec3 uSkyZen;
+uniform vec3 uSkyMid;
+uniform vec3 uSkyHor;
+uniform vec3 uSunGlow;
+uniform vec3 uSkyGround;
+uniform vec3 uAmb;         // ambient tint multiplier
+#define SUN_DIR uSunDir
+#define SUN_COL uSunCol
 
 float hash1(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float vnoise(vec2 p) {
@@ -27,14 +36,14 @@ float vnoise(vec2 p) {
 // Evening sky (used for the background AND for reflections).
 vec3 sky_color(vec3 d) {
     float h = d.z;
-    vec3 zen = vec3(0.035, 0.05, 0.13);
-    vec3 mid = vec3(0.22, 0.15, 0.30);
-    vec3 hor = vec3(0.95, 0.46, 0.20);
+    vec3 zen = uSkyZen;
+    vec3 mid = uSkyMid;
+    vec3 hor = uSkyHor;
     vec3 c = mix(hor, mid, smoothstep(-0.02, 0.28, h));
     c = mix(c, zen, smoothstep(0.28, 0.85, h));
     float sd = max(dot(d, SUN_DIR), 0.0);
-    c += vec3(1.0, 0.55, 0.25) * (pow(sd, 8.0) * 0.45 + pow(sd, 90.0) * 1.2);
-    c = mix(c, vec3(0.04, 0.035, 0.05), smoothstep(0.0, -0.12, h));   // below horizon
+    c += uSunGlow * (pow(sd, 8.0) * 0.45 + pow(sd, 90.0) * 1.2);
+    c = mix(c, uSkyGround, smoothstep(0.0, -0.12, h));   // below horizon
     return c;
 }
 
@@ -79,6 +88,12 @@ uniform int passMode;          // 0 = opaque parts, 1 = translucent walls + ceil
 uniform float time;
 uniform float detailBias;      // 1 = smooth distant detail, 2 = "sharp" (detail kept twice as far)
 uniform vec4 ballMark;         // RL ball marker: ball x, y, centre z, height factor 0..1 (< 0 = off)
+uniform int mapId;             // 0 valley, 1 Forbidden Temple, 2 Parc de Paris, 3 Orbit (maps.py)
+uniform vec3 grassCol;         // the turf's base colour on this map
+uniform float glassK;          // wall / ceiling glass opacity factor (1 = valley)
+
+// Greek-key (meander) tile, 5x5 cells, row 0 at the bottom (Forbidden Temple's centre band)
+const float KEY[25] = float[25](1.,1.,1.,1.,1.,  1.,0.,0.,0.,1.,  1.,0.,1.,1.,1.,  1.,0.,0.,0.,0.,  1.,1.,1.,1.,1.);
 
 in vec3 v_pos;
 in vec3 v_nrm;
@@ -189,12 +204,12 @@ void main() {
             // uniform base (no patches); individual strands faked as short, randomly oriented blades in
             // two jittered cell layers, each blade darker at its root and bright at its tip. Filtered to the
             // average colour as blades get smaller than a pixel, so it's crisp up close and smooth far away.
-            col = vec3(0.080, 0.265, 0.050);
+            col = grassCol;
             // blades fade over a wider band, on a footprint between the longest axis (no shimmer) and the
             // area (sharp), so there's no visible line where the strands stop
             float pxb = mix(px, sqrt(max(length(dFdx(q)) * length(dFdy(q)), 1e-6)) / max(detailBias, 1.0), 0.5);
             float fineW = 1.0 - smoothstep(0.7, 4.5, pxb);
-            if (fineW > 0.0) {
+            if (fineW > 0.0 && mapId != 3) {                 // (Orbit: a metal floor, no blades)
                 float blades = 0.0;
                 for (int L = 0; L < 2; L++) {
                     float cs = L == 0 ? 3.2 : 2.1;
@@ -284,13 +299,63 @@ void main() {
             white = max(white, aline(q.y, 11.0));
             white = max(white, 1.0 - smoothstep(34.0, 38.0 + fwidth(r), r));
             dark = max(dark, aline(q.y, 22.0) * disc);              // thin dark split between the half discs
-            // paint: zones sit on slightly darker turf, team colour over it, dark chevrons over solid fills
-            col *= 1.0 - 0.18 * zone;
-            col = mix(col, tc, fill * 0.92);
-            col = mix(col, col * 0.25, dark * fill);
-            col = mix(col, vec3(0.80, 0.83, 0.80), white * 0.8);
-            emis += tc * fill * (1.0 - dark) * 0.12;
-            spec = 0.03;
+            // ---- per-map field style (the valley keeps the markings above as they are) ----
+            if (mapId == 1) {                        // Forbidden Temple: zones and lanes only faintly tinted
+                fill *= 0.12 + 0.88 * (1.0 - smoothstep(1000.0, 1100.0, r)); dark *= 0.5; zone *= 0.4;
+            } else if (mapId == 2) {                 // Parc de Paris: striped turf, white lines, a small centre disc
+                float pw = aline(q.y, 11.0) * step(0.5, fract(q.x / 300.0 + 0.25));         // dashed halfway line
+                pw = max(pw, aline(r - 1080.0, 11.0));
+                pw = max(pw, 0.8 * aline(r - 2900.0, 10.0));
+                pw = max(pw, aline(zD, 10.0));
+                pw = max(pw, aline(boxD, 9.0));
+                pw = max(pw, aline(arc, 12.0) * step(ax, 2900.0) * step(ay, 3360.0));
+                pw = max(pw, 0.7 * aline(ax - 3000.0, 8.0) * step(ay, 3350.0));
+                white = pw;
+                fill = 1.0 - smoothstep(160.0 - fwidth(r), 160.0 + fwidth(r), r);
+                dark = 0.0; zone = 0.0;
+                col *= 0.88 + 0.20 * step(0.5, fract(r / 760.0));                           // mowing rings
+            }
+            if (mapId == 3) {
+                // Orbit: dark metal deck plates, a faint cyan light grid, every marking a neon line
+                vec2 pl = q / 512.0;
+                vec2 pf = abs(fract(pl) - 0.5);
+                float seam = aline((0.5 - max(pf.x, pf.y)) * 512.0, 3.0);
+                col = grassCol * (0.85 + 0.3 * hash1(floor(pl))) * (1.0 + 0.10 * grain);
+                col *= 1.0 - 0.55 * seam;
+                float lg = max(aline((fract(q.x / 1024.0) - 0.5) * 1024.0, 4.0), aline((fract(q.y / 1024.0) - 0.5) * 1024.0, 4.0));
+                emis += vec3(0.10, 0.35, 0.60) * lg * 0.22;
+                float fz = fill * (0.25 + 0.75 * (1.0 - smoothstep(1000.0, 1100.0, r)));      // centre full, zones faint
+                col = mix(col, tc * 0.5, fz * 0.25);
+                emis += tc * fz * (1.0 - dark) * 0.12;
+                emis += mix(tc * 1.8, vec3(0.75, 0.92, 1.0), 0.35) * white * 0.9;
+                col = mix(col, vec3(0.9), white * 0.35);
+                spec = 0.30;
+            } else {
+                // paint: zones sit on slightly darker turf, team colour over it, dark chevrons over solid fills
+                col *= 1.0 - 0.18 * zone;
+                col = mix(col, tc, fill * 0.92);
+                col = mix(col, col * 0.25, dark * fill);
+                col = mix(col, vec3(0.80, 0.83, 0.80), white * 0.8);
+                emis += tc * fill * (1.0 - dark) * 0.12;
+                spec = 0.03;
+            }
+            if (mapId == 1) {
+                // centre medallion (cream disc, red ring, dark red core) and a Greek-key band around it in the
+                // team colours, like the temple's floor
+                float med = 1.0 - smoothstep(430.0 - fwidth(r), 430.0 + fwidth(r), r);
+                col = mix(col, vec3(0.72, 0.64, 0.54), med * 0.95);
+                col = mix(col, vec3(0.50, 0.05, 0.03), aline(r - 305.0, 28.0) * med);
+                col = mix(col, vec3(0.28, 0.035, 0.03), 1.0 - smoothstep(150.0, 150.0 + fwidth(r), r));
+                col = mix(col, vec3(0.80, 0.70, 0.45), aline(r - 450.0, 8.0));
+                float s_ = atan(q.y, q.x) * 660.0;
+                vec2 kt = vec2(fract(s_ / 200.0), (r - 560.0) / 200.0);
+                if (kt.y > 0.0 && kt.y < 1.0) {
+                    ivec2 kc = ivec2(floor(kt * 5.0));
+                    float key = KEY[kc.y * 5 + kc.x] * (1.0 - smoothstep(0.35, 0.8, fwidth(s_) / 40.0));
+                    col = mix(col, tc * 1.05, key * 0.9);
+                    emis += tc * key * 0.10;
+                }
+            }
         }
     } else if (inGoal) {
         // goal net: see-through like the walls, team-coloured net grid
@@ -329,7 +394,7 @@ void main() {
         float hl = aline(he, 5.0);
         col = mix(vec3(0.10, 0.12, 0.16), teamCol, 0.35 + 0.35 * endness);
         float fres = pow(1.0 - abs(dot(n, V)), 3.0);
-        alpha = 0.13 + 0.12 * fres + hl * 0.55;              // no floor-level glow band
+        alpha = (0.13 + 0.12 * fres) * glassK + hl * 0.55 * (0.5 + 0.5 * glassK);   // no floor-level glow band
         emis += teamCol * hl * (0.6 + 0.3 * endness);
         if (ceil) alpha *= 0.85;
         // glowing rounded goal frame around the goal mouth on the back walls
@@ -349,7 +414,7 @@ void main() {
 
     // ---- lighting ----
     float ndl = max(dot(n, SUN_DIR), 0.0);
-    vec3 amb = mix(vec3(0.12, 0.11, 0.12), vec3(0.42, 0.40, 0.46), n.z * 0.5 + 0.5);
+    vec3 amb = mix(vec3(0.12, 0.11, 0.12), vec3(0.42, 0.40, 0.46), n.z * 0.5 + 0.5) * uAmb;
     float sh = grid ? shadowAt(p) : 0.0;
     vec3 lit = col * (amb * 1.25 + SUN_COL * ndl * 0.75 * (1.0 - sh));
     vec3 H = normalize(SUN_DIR + V);
@@ -414,7 +479,7 @@ void main() {
     else                 { base = vec3(0.30, 0.31, 0.33);    ks = 0.45; gloss = 50.0;  env = 0.25; }
 
     float ndl = max(dot(n, SUN_DIR), 0.0);
-    vec3 amb = mix(vec3(0.07, 0.07, 0.07), vec3(0.32, 0.35, 0.42), n.z * 0.5 + 0.5);
+    vec3 amb = mix(vec3(0.07, 0.07, 0.07), vec3(0.32, 0.35, 0.42), n.z * 0.5 + 0.5) * uAmb;
     vec3 c = base * (amb * 1.5 + SUN_COL * ndl * 1.1);
     vec3 H = normalize(SUN_DIR + V);
     c += SUN_COL * ks * pow(max(dot(n, H), 0.0), gloss) * (gloss + 8.0) / 60.0;
@@ -543,7 +608,7 @@ void main() {
     vec3 n = normalize(v_nrm);
     vec3 V = normalize(camPos - v_pos);
     float ndl = max(dot(n, SUN_DIR), 0.0);
-    vec3 amb = mix(vec3(0.10, 0.10, 0.11), vec3(0.40, 0.41, 0.44), n.z * 0.5 + 0.5);
+    vec3 amb = mix(vec3(0.10, 0.10, 0.11), vec3(0.40, 0.41, 0.44), n.z * 0.5 + 0.5) * uAmb;
     vec3 c = base * (amb * 1.35 + SUN_COL * ndl * 1.0);
     vec3 H = normalize(SUN_DIR + V);
     c += SUN_COL * ks * pow(max(dot(n, H), 0.0), rough);
@@ -584,6 +649,9 @@ SKY_FRAG = '''
 ''' + COMMON + '''
 uniform mat4 invVP;
 uniform float time;
+uniform int mapId;         // 0 valley, 1 temple, 2 paris, 3 orbit
+uniform vec4 cloudA;       // cloud colour lit (rgb), coverage threshold (a: lower = more clouds)
+uniform vec4 cloudB;       // cloud colour shadowed (rgb), opacity (a)
 in vec2 v_ndc;
 out vec4 f_color;
 
@@ -625,17 +693,141 @@ vec3 skyline(vec3 d, vec3 c) {
     return c;
 }
 
+float fbm3(vec2 p) { return vnoise(p) * 0.5 + vnoise(p * 2.1 + 3.1) * 0.3 + vnoise(p * 4.3 + 7.7) * 0.2; }
+float hash3(vec3 p) { return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
+
+// stars: one candidate per cell of a 3D grid on the unit sphere, at least ~1 px wide so they never shimmer
+vec3 stars(vec3 d, float scale, float density) {
+    vec3 p = d * scale;
+    vec3 cell = floor(p);
+    float h = hash3(cell);
+    if (h < density) return vec3(0.0);
+    vec3 j = vec3(hash3(cell + 1.3), hash3(cell + 2.7), hash3(cell + 5.1)) - 0.5;
+    float dist = length(fract(p) - 0.5 - j * 0.5);
+    float px = max(length(fwidth(p)), 1e-4);
+    float rad = max(0.045, px * 0.7);
+    float b = (1.0 - smoothstep(rad * 0.3, rad, dist)) * (0.35 + 0.65 * fract(h * 37.0));
+    b *= 0.75 + 0.25 * sin(time * (1.5 + 3.0 * fract(h * 91.0)) + h * 50.0);          // twinkle
+    vec3 tint = mix(vec3(0.75, 0.82, 1.0), vec3(1.0, 0.85, 0.7), fract(h * 13.0));
+    return tint * b * min(1.0, 0.06 / rad);
+}
+
+// a sphere in the sky seen from the arena: direction P, angular radius R -> coverage (a) and its normal
+vec4 skySphere(vec3 d, vec3 P, float R, out vec3 nrm) {
+    float c = dot(d, P);
+    float sinR = sin(R);
+    vec3 x = d - P * c;
+    float r2 = dot(x, x) / (sinR * sinR);
+    nrm = vec3(0.0, 0.0, 1.0);
+    if (c < 0.0 || r2 >= 1.0) return vec4(0.0);
+    vec3 T1 = normalize(cross(P, vec3(0.0, 0.0, 1.0)));
+    vec3 T2 = cross(T1, P);
+    float u = dot(x, T1) / sinR, v = dot(x, T2) / sinR;
+    nrm = normalize(T1 * u + T2 * v - P * sqrt(max(0.0, 1.0 - r2)));
+    float edge = 1.0 - smoothstep(0.985, 1.0, r2);
+    return vec4(1.0, 1.0, 1.0, edge);
+}
+
+vec3 spaceSky(vec3 d) {
+    vec3 c = vec3(0.003, 0.004, 0.010);
+    // Milky Way: a band along a great circle, dusty and mottled, with darker lanes
+    vec3 N = normalize(vec3(0.35, -0.45, 0.82));
+    float bd = dot(d, N);
+    vec2 bq = vec2(atan(d.y, d.x) * 3.0, bd * 9.0);
+    float dust = fbm3(bq * 1.7 + 4.0);
+    float band = exp(-bd * bd / 0.035) * (0.45 + 0.9 * dust);
+    c += band * mix(vec3(0.05, 0.05, 0.09), vec3(0.16, 0.12, 0.10), smoothstep(0.4, 0.9, dust)) * 0.9;
+    c -= band * 0.03 * smoothstep(0.55, 0.8, fbm3(bq * 4.0));
+    // nebula: soft magenta / teal clouds in one region of the sky
+    vec3 NB = normalize(vec3(-0.6, -0.55, 0.35));
+    float nd = max(dot(d, NB), 0.0);
+    float nm = fbm3(d.xy * 5.0 + d.z * 3.0) * fbm3(d.yz * 3.0 + 9.0);
+    c += (vec3(0.30, 0.05, 0.25) * nm + vec3(0.02, 0.18, 0.22) * (1.0 - nm) * 0.5) * pow(nd, 5.0) * 0.9;
+    c = max(c, vec3(0.0));
+    c += stars(d, 260.0, 0.93) * 1.1 + stars(d, 700.0, 0.965) * 0.6 + band * stars(d, 1500.0, 0.90) * 0.6;
+    // the star lighting the scene: a hot disc with a wide glare
+    float sd = max(dot(d, SUN_DIR), 0.0);
+    c += vec3(1.0, 0.97, 0.9) * (smoothstep(0.99955, 0.9997, sd) * 12.0 + pow(sd, 400.0) * 1.5 + pow(sd, 24.0) * 0.08);
+
+    // ringed gas giant
+    vec3 GP = normalize(vec3(-0.55, 0.62, 0.42));
+    float GR = 0.21;
+    vec3 GA = normalize(vec3(0.25, -0.35, 1.0));            // spin axis = ring normal
+    vec3 gn;
+    vec4 g = skySphere(d, GP, GR, gn);
+    // ring: a plane through the planet centre (planet at distance 1), 1.35..2.35 planet radii
+    float dd = dot(d, GA);
+    float tR = abs(dd) > 1e-4 ? dot(GP, GA) / dd : -1.0;
+    float rr = length(d * tR - GP) / sin(GR);
+    float ringA = 0.0; vec3 ringC = vec3(0.0);
+    if (tR > 0.0 && rr > 1.35 && rr < 2.35) {
+        float rb = fract(rr * 7.3);
+        ringA = (0.35 + 0.5 * vnoise(vec2(rr * 40.0, 1.0))) * smoothstep(1.35, 1.45, rr) * (1.0 - smoothstep(2.2, 2.35, rr));
+        ringA *= 1.0 - 0.75 * step(1.82, rr) * step(rr, 1.9);                                   // the gap
+        ringC = mix(vec3(0.75, 0.66, 0.52), vec3(0.55, 0.50, 0.46), rb) * (0.25 + 0.9 * abs(dot(GA, SUN_DIR)));
+    }
+    bool ringFront = tR < dot(d, GP);                       // the ring crossing is nearer than the planet centre
+    if (!ringFront) c = mix(c, ringC, ringA);
+    if (g.a > 0.0) {
+        float lat = dot(gn, GA);
+        float bands = fbm3(vec2(lat * 9.0, lat * 2.0 + fbm3(vec2(lat * 30.0, dot(gn, cross(GA, GP)) * 3.0)) * 0.6));
+        vec3 alb = mix(vec3(0.62, 0.45, 0.30), vec3(0.85, 0.74, 0.58), bands);
+        alb = mix(alb, vec3(0.55, 0.28, 0.20), smoothstep(0.62, 0.75, fbm3(vec2(lat * 22.0, 3.0))) * 0.5);
+        float lit = max(dot(gn, SUN_DIR), 0.0);
+        vec3 pc = alb * (0.02 + 1.1 * lit);
+        pc += vec3(0.35, 0.45, 0.7) * pow(1.0 - max(dot(gn, -d), 0.0), 3.0) * (0.15 + 0.6 * lit);   // atmosphere rim
+        c = mix(c, pc, g.a);
+    }
+    if (ringFront) c = mix(c, ringC, ringA);
+    // two moons
+    vec3 mn;
+    vec4 m1 = skySphere(d, normalize(vec3(0.72, 0.30, 0.38)), 0.045, mn);
+    if (m1.a > 0.0) {
+        float cr = fbm3(mn.xy * 9.0 + mn.z * 4.0);
+        c = mix(c, vec3(0.55, 0.54, 0.52) * (0.7 + 0.5 * cr) * (0.02 + max(dot(mn, SUN_DIR), 0.0)), m1.a);
+    }
+    vec4 m2 = skySphere(d, normalize(vec3(0.15, -0.85, 0.30)), 0.025, mn);
+    if (m2.a > 0.0) {
+        float cr = fbm3(mn.yz * 12.0 + 5.0);
+        c = mix(c, vec3(0.62, 0.48, 0.38) * (0.7 + 0.5 * cr) * (0.02 + max(dot(mn, SUN_DIR), 0.0)), m2.a);
+    }
+    // the planet far below (the arena is in orbit): ocean, continents, clouds, a blue limb
+    if (d.z < -0.28) {
+        float k = (-d.z - 0.28) / 0.72;
+        vec2 pq = d.xy / max(-d.z, 0.05) * 1.6 + vec2(time * 0.004, 0.0);
+        float land = smoothstep(0.52, 0.58, fbm3(pq * 1.3 + 20.0));
+        float cloud = smoothstep(0.5, 0.8, fbm3(pq * 2.6 + vec2(time * 0.01, 3.0)));
+        vec3 surf = mix(vec3(0.02, 0.07, 0.20), mix(vec3(0.10, 0.20, 0.07), vec3(0.35, 0.30, 0.18), fbm3(pq * 5.0)), land);
+        surf = mix(surf, vec3(0.85, 0.88, 0.92), cloud * 0.8);
+        vec3 pn = normalize(vec3(d.xy * 0.6, 1.0));
+        float lit = 0.15 + 0.85 * max(dot(pn, SUN_DIR) * 0.8 + 0.2, 0.0);
+        vec3 pc = mix(vec3(0.25, 0.5, 1.0) * 0.8, surf * lit, smoothstep(0.0, 0.25, k));   // atmosphere at the limb
+        c = mix(c, pc, smoothstep(0.0, 0.02, k));
+    }
+    c += vec3(0.15, 0.35, 0.8) * exp(-pow((d.z + 0.28) / 0.03, 2.0)) * 0.5;                    // limb glow
+    return c;
+}
+
 void main() {
     vec4 a = invVP * vec4(v_ndc, -1.0, 1.0);
     vec4 b = invVP * vec4(v_ndc, 1.0, 1.0);
     vec3 d = normalize(b.xyz / b.w - a.xyz / a.w);
+    if (mapId == 3) {
+        f_color = vec4(to_srgb(spaceSky(d)), 1.0);
+        return;
+    }
     vec3 c = sky_color(d);
     if (d.z > 0.02) {                                     // clouds
         vec2 uv = d.xy / (d.z + 0.25) * 2.2 + vec2(time * 0.01, 0.0);
         float cl = vnoise(uv) * 0.6 + vnoise(uv * 2.3) * 0.3 + vnoise(uv * 5.1) * 0.1;
-        cl = smoothstep(0.52, 0.85, cl) * smoothstep(0.02, 0.25, d.z);
-        vec3 ccol = mix(vec3(0.95, 0.55, 0.35), vec3(0.35, 0.25, 0.40), smoothstep(0.1, 0.6, d.z));
-        c = mix(c, ccol, cl * 0.55);
+        cl = smoothstep(cloudA.a, cloudA.a + 0.33, cl) * smoothstep(0.02, 0.25, d.z);
+        vec3 ccol = mix(cloudA.rgb, cloudB.rgb, smoothstep(0.1, 0.6, d.z));
+        if (mapId != 0) {
+            // big cloud masses: lit toward the sun, darker bellies
+            float sd = max(dot(normalize(d.xy + 1e-5), normalize(SUN_DIR.xy + 1e-5)), 0.0);
+            ccol *= 0.75 + 0.55 * pow(sd, 3.0) + 0.25 * (vnoise(uv * 1.3 + 5.0) - 0.5);
+        }
+        c = mix(c, ccol, cl * cloudB.a);
     }
     f_color = vec4(to_srgb(c), 1.0);
 }
@@ -868,7 +1060,7 @@ void main() {
     float tfade = 1.0 - smoothstep(0.5, 2.0, length(fwidth(tp)));
     alb *= mix(1.0, 0.84 + 0.32 * tex, tfade);
     float ndl = max(dot(n, SUN_DIR), 0.0);
-    vec3 amb = mix(vec3(0.10, 0.09, 0.12), vec3(0.34, 0.32, 0.42), n.z * 0.5 + 0.5);
+    vec3 amb = mix(vec3(0.10, 0.09, 0.12), vec3(0.34, 0.32, 0.42), n.z * 0.5 + 0.5) * uAmb;
     vec3 c = alb * (amb * 1.15 + SUN_COL * ndl * 0.95);
     // haze: blend toward the sky colour in the view direction (mountains fade into the dusk)
     float dist = length(camPos - v_pos);
@@ -958,7 +1150,7 @@ void main() {
         c += vec3(1.0, 0.85, 0.6) * 0.45 * flash * flash;            // soft settle after the respawn
     } else {
         float ndl = max(dot(n, SUN_DIR), 0.0);
-        vec3 amb = mix(vec3(0.08), vec3(0.35, 0.34, 0.38), n.z * 0.5 + 0.5);
+        vec3 amb = mix(vec3(0.08), vec3(0.35, 0.34, 0.38), n.z * 0.5 + 0.5) * uAmb;
         c = tex * 0.7 * (amb * 1.3 + SUN_COL * ndl * 0.8);
         if (charge >= 0.0) {
             // Empty pad (RL): the base stays black for the first half of the recharge, then turns white, the
@@ -1054,3 +1246,177 @@ void main() {
     f_color = vec4(color.rgb * a, a);
 }
 """
+
+
+# --------------------------------------------------------------------------------------------- #
+# Map scenery (maps.py): one static non-indexed mesh per map, every vertex = pos(3) + colour(3) + (emission,
+# kind). Flat faces (normal from screen derivatives). kind: 0 matte, 1 water, 2 glowing (lanterns, lamps),
+# 3 building facade with lit windows, 4 iron lattice (see-through, golden lights), 5 metal, 6 foliage,
+# 7 neon strip, 9 floating lantern (bobs; emission channel = its phase).
+SCENE_VERT = '''
+#version 330
+uniform mat4 m_vp;
+uniform float time;
+in vec3 in_position;
+in vec3 in_col;
+in vec2 in_ek;
+out vec3 v_pos;
+out vec3 v_col;
+flat out vec2 v_ek;
+void main() {
+    vec3 p = in_position;
+    if (abs(in_ek.y - 9.0) < 0.5) {
+        float ph = in_ek.x;
+        p.z += 90.0 * sin(time * 0.45 + ph * 6.2832);
+        p.xy += 40.0 * vec2(sin(time * 0.3 + ph * 11.0), cos(time * 0.27 + ph * 7.0));
+    }
+    v_pos = p;
+    v_col = in_col;
+    v_ek = in_ek;
+    gl_Position = m_vp * vec4(p, 1.0);
+}
+'''
+
+SCENE_FRAG = '''
+#version 330
+''' + COMMON + '''
+uniform vec3 camPos;
+uniform float time;
+uniform vec3 haze;          // near, far, strength
+in vec3 v_pos;
+in vec3 v_col;
+flat in vec2 v_ek;
+out vec4 f_color;
+
+void main() {
+    vec3 n = normalize(cross(dFdx(v_pos), dFdy(v_pos)));
+    vec3 V = normalize(camPos - v_pos);
+    if (dot(n, V) < 0.0) n = -n;
+    float kind = floor(v_ek.y + 0.5);
+    float em = v_ek.x;
+    vec3 alb = v_col;
+    vec3 emis = vec3(0.0);
+    float spec = 0.0;
+    float dist = length(camPos - v_pos);
+    vec3 dir = -V;
+    vec3 hz = sky_color(vec3(dir.xy, max(dir.z, 0.02)));
+    float hk = smoothstep(haze.x, haze.y, dist) * haze.z;
+    // face coordinates for the patterns: horizontal position along the wall + height
+    vec2 fq = abs(n.x) > abs(n.y) ? vec2(v_pos.y, v_pos.z) : vec2(v_pos.x, v_pos.z);
+    if (kind == 1.0) {                                      // water: sky reflection with fresnel, soft ripples
+        vec3 wn = normalize(vec3(0.03 * sin(v_pos.x / 160.0 + v_pos.y / 230.0 + time * 0.6),
+                                 0.03 * sin(v_pos.y / 190.0 - v_pos.x / 310.0 + time * 0.5), 1.0));
+        float fres = 0.15 + 0.85 * pow(1.0 - max(dot(wn, V), 0.0), 4.0);
+        vec3 wc = mix(alb * 0.3, sky_color(reflect(-V, wn)), fres);
+        wc += SUN_COL * pow(max(dot(reflect(-V, wn), SUN_DIR), 0.0), 200.0) * 2.0;
+        f_color = vec4(to_srgb(mix(wc, hz, hk)), 1.0);
+        return;
+    } else if (kind == 2.0 || kind == 9.0) {                // lanterns / lamps: glow, a slow flicker each
+        float ph = kind == 9.0 ? em * 37.0 : hash1(floor(v_pos.xy / 60.0));
+        float fl = 0.85 + 0.15 * sin(time * (2.0 + 3.0 * fract(ph * 7.0)) + ph * 40.0);
+        vec3 e = alb * (kind == 9.0 ? 2.2 : em) * fl;
+        f_color = vec4(to_srgb(mix(e, hz, hk * 0.35)), 1.0);
+        return;
+    } else if (kind == 3.0 && abs(n.z) < 0.35) {            // facades: a grid of windows, some lit
+        vec2 wg = vec2(fq.x / 260.0, (fq.y - 60.0) / 330.0);
+        vec2 wi = floor(wg), wf = fract(wg);
+        float fw_ = max(length(fwidth(wg)), 1e-4);
+        float win = step(0.28, wf.x) * step(wf.x, 0.72) * step(0.22, wf.y) * step(wf.y, 0.80) * step(0.0, fq.y - 60.0);
+        win *= 1.0 - smoothstep(0.25, 0.6, fw_);            // far away: the average colour, no shimmer
+        float lit = step(0.52, hash1(wi + floor(v_pos.xy / 3000.0) * 7.1));
+        vec3 wl = mix(vec3(1.0, 0.72, 0.40), vec3(1.0, 0.86, 0.62), hash1(wi * 1.3));
+        alb = mix(alb, vec3(0.05, 0.06, 0.08), win);
+        emis += wl * win * lit * 1.1 + wl * (1.0 - smoothstep(0.25, 0.6, fw_) > 0.5 ? 0.0 : 0.12) * lit * 0.5;
+        // a balcony line every other floor
+        alb *= 1.0 - 0.25 * step(0.9, fract((fq.y - 60.0) / 660.0)) * step(0.0, fq.y - 60.0);
+    } else if (kind == 4.0) {                               // iron lattice: diagonal bars, see-through, golden lights
+        vec2 lq = fq / 420.0;
+        float fwl = max(length(fwidth(lq)), 1e-4);
+        vec2 dg = abs(fract(vec2(lq.x + lq.y, lq.x - lq.y) * 0.5) - 0.5);
+        float bar = min(dg.x, dg.y);
+        if (fwl < 0.3) {
+            if (bar > 0.10 + fwl * 0.6) discard;             // the holes between the bars
+        } else if (((int(gl_FragCoord.x) + int(gl_FragCoord.y)) & 1) == 0) {
+            discard;                                         // too far for bars: ~half see-through (MSAA-averaged)
+        }
+        // warm floodlight on the iron, a string of bulbs along the bars, sparkles every few seconds
+        vec2 bulb = abs(fract(lq * 2.0) - 0.5);
+        float bl = (1.0 - smoothstep(0.08, 0.16 + fwl, max(bulb.x, bulb.y))) * (1.0 - smoothstep(0.3, 0.8, fwl));
+        float spark = step(0.97, hash1(floor(lq * 2.0) + floor(time * 1.5))) * (1.0 - smoothstep(0.2, 0.6, fwl));
+        emis += vec3(1.0, 0.62, 0.25) * (0.10 + 0.9 * bl + 3.0 * spark);
+    } else if (kind == 5.0) {                               // metal: reflective panels
+        spec = 0.6;
+        alb *= 0.9 + 0.2 * hash1(floor(fq / 400.0));
+        emis += sky_color(reflect(-V, n)) * 0.25;
+    } else if (kind == 7.0) {                               // neon strip
+        vec3 e = alb * em * (0.85 + 0.15 * sin(time * 2.0 + (v_pos.x + v_pos.y) / 900.0));
+        f_color = vec4(to_srgb(mix(e, hz, hk * 0.3)), 1.0);
+        return;
+    }
+    if (kind == 6.0) alb *= 0.85 + 0.3 * hash1(floor(v_pos.xy / 120.0 + v_pos.z / 90.0));
+    float ndl = max(dot(n, SUN_DIR), 0.0);
+    vec3 amb = mix(vec3(0.10, 0.09, 0.12), vec3(0.34, 0.32, 0.42), n.z * 0.5 + 0.5) * uAmb;
+    vec3 c = alb * (amb * 1.15 + SUN_COL * ndl * 0.95);
+    c += SUN_COL * spec * pow(max(dot(n, normalize(SUN_DIR + V)), 0.0), 40.0);
+    c += alb * em * (kind == 0.0 || kind == 6.0 ? 1.0 : 0.0);          // self-lit tint (e.g. lit paper walls)
+    c = mix(c, hz, hk);
+    c += emis * (1.0 - hk * 0.6);
+    f_color = vec4(to_srgb(c), 1.0);
+}
+'''
+
+# The crowd: one egg mesh (unit height, pos + normal) instanced per seat; per instance position, colour, (phase,
+# scale). `cheer` (0..1) makes them jump on their seats after a goal or a save.
+CROWD_VERT = '''
+#version 330
+uniform mat4 m_vp;
+uniform float time;
+uniform float cheer;
+in vec3 in_position;
+in vec3 in_normal;
+in vec3 i_pos;
+in vec3 i_col;
+in vec2 i_ps;
+out vec3 v_pos;
+out vec3 v_nrm;
+out vec3 v_col;
+void main() {
+    float ph = i_ps.x, sc = i_ps.y;
+    float jumper = step(0.12, fract(ph * 17.3));                          // a few stay seated
+    float f = 7.5 + 4.0 * fract(ph * 3.1);
+    float hop = abs(sin(time * f + ph * 6.2832));
+    float j = cheer * jumper * (16.0 + 26.0 * fract(ph * 7.3)) * sc / 60.0 * hop;
+    float idle = 1.2 * sin(time * 1.3 + ph * 40.0);
+    vec3 p = in_position * sc;
+    p.z *= 1.0 + 0.10 * cheer * jumper * (hop - 0.5);                     // stretch in the air, squash landing
+    p += i_pos + vec3(0.0, 0.0, idle + j);
+    v_pos = p;
+    v_nrm = in_normal;
+    v_col = i_col;
+    gl_Position = m_vp * vec4(p, 1.0);
+}
+'''
+
+CROWD_FRAG = '''
+#version 330
+''' + COMMON + '''
+uniform vec3 camPos;
+uniform vec3 haze;
+in vec3 v_pos;
+in vec3 v_nrm;
+in vec3 v_col;
+out vec4 f_color;
+void main() {
+    vec3 n = normalize(v_nrm);
+    vec3 V = normalize(camPos - v_pos);
+    float ndl = max(dot(n, SUN_DIR), 0.0);
+    vec3 amb = mix(vec3(0.12, 0.11, 0.14), vec3(0.42, 0.40, 0.48), n.z * 0.5 + 0.5) * uAmb;
+    vec3 c = v_col * (amb * 1.3 + SUN_COL * (ndl * 0.8 + 0.15));
+    c += SUN_COL * 0.35 * pow(max(dot(n, normalize(SUN_DIR + V)), 0.0), 36.0);     // glossy shell
+    c += v_col * 0.25 * pow(1.0 - max(dot(n, V), 0.0), 3.0);                        // soft rim
+    float dist = length(camPos - v_pos);
+    vec3 dir = -V;
+    c = mix(c, sky_color(vec3(dir.xy, max(dir.z, 0.02))), smoothstep(haze.x, haze.y, dist) * haze.z);
+    f_color = vec4(to_srgb(c), 1.0);
+}
+'''

@@ -61,6 +61,7 @@ Run several instances side by side with `RSV_PORT=<port>`.
 | M | mute (when sound files are installed) |
 | `[` / `]` | volume down / up |
 | H | show/hide the top-left panel (Edit Settings: camera, audio, graphics) |
+| ← ↑ → ↓ | map: ← Forbidden Temple, ↑ Evening Valley, → Parc de Paris, ↓ Orbit (remembered for the next start) |
 
 **Graphics** (H → Edit Settings → Graphics, applied live): anti-aliasing (MSAA off/2x/4x/8x), resolution
 (Balanced caps the 3D scene at 2.1 MP and upscales it: pick Native on a 1440p/4K screen if it looks soft, or
@@ -81,6 +82,12 @@ there are git-ignored, so they never get committed by accident.
 
 ## Features
 
+- **Maps** (arrow keys, remembered): the evening valley below; a Forbidden Temple-style pink dusk with karst
+  peaks, pagodas, a paifang gate, cherry trees and lanterns; a Parc de Paris-style violet evening with the Eiffel
+  Tower down the Champ de Mars, Haussmann blocks, the Seine and a floodlit two-tier stand; and an orbital platform in
+  space (stars, the Milky Way, a ringed gas giant, moons, the planet below, asteroids, a station). Each has its own
+  sky, light and field style, and a crowd of eggs that jumps on its seats after goals and saves (a save = a
+  defender's touch on a ball that was going in).
 - **Arena**: see-through hexagon walls and ceiling, a grass pitch with Rocket League-style team markings (striped
   zones in front of each goal, split centre circle, team lanes), team-coloured floor-to-wall curves, translucent team
   nets, soft shadows, a low-poly valley with mountains, trees and a lake under an evening sky.
