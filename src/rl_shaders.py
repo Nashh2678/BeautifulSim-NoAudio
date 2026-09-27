@@ -78,6 +78,7 @@ uniform vec3 orangeCol;
 uniform int passMode;          // 0 = opaque parts, 1 = translucent walls + ceiling
 uniform float time;
 uniform float detailBias;      // 1 = smooth distant detail, 2 = "sharp" (detail kept twice as far)
+uniform vec4 ballMark;         // RL ball marker: ball x, y, centre z, height factor 0..1 (< 0 = off)
 
 in vec3 v_pos;
 in vec3 v_nrm;
@@ -107,6 +108,29 @@ float footprint(vec2 p) {
     float field = max(max(abs(p.x) - 4096.0, abs(p.y) - 5120.0), (abs(p.x) + abs(p.y) - 8064.0) * 0.7071);
     float goal = max(abs(p.x) - 900.0, abs(p.y) - 6000.0);
     return min(field, goal);
+}
+// RL's white ball marker, projected straight down onto the floor / floor-wall curve under the ball: a fixed
+// outer ring on the ball's x/y, and an inner ring of 4 arcs that is almost as big as the outer one when the
+// ball is on the ground and shrinks (arcs shortening) as it rises, down to 4 dots by ~half the ceiling height.
+// The two never touch. Derivatives are taken before any masking (no divergent fwidth).
+float ballMarkAt(vec3 p, vec3 n) {
+    vec2 d = p.xy - ballMark.xy;
+    float r = length(d);
+    float fw = max(fwidth(r), 1e-3);
+    float t = clamp(ballMark.w, 0.0, 1.0);
+    const float RO = 108.0;
+    float wo = max(2.4, 0.8 * fw);
+    float outer = 1.0 - smoothstep(wo - fw, wo + fw, abs(r - RO));
+    float ri = RO * mix(0.80, 0.33, t);
+    float hs = 0.72 * pow(1.0 - t, 0.8);                         // half angle of each arc (rad)
+    float a = atan(d.y, d.x) - 0.78539816;                        // arcs centred on the diagonals
+    float dl = a - floor(a / 1.5707963 + 0.5) * 1.5707963;
+    float ang = a - dl + clamp(dl, -hs, hs) + 0.78539816;
+    float di = length(d - ri * vec2(cos(ang), sin(ang)));
+    float wi = max(mix(2.4, 3.6, t), 0.8 * fw);                   // the dots a bit fatter than the line
+    float inner = 1.0 - smoothstep(wi - fw, wi + fw, di);
+    float on = step(0.0, ballMark.w) * step(p.z, ballMark.z) * step(0.2, n.z) * step(r, 140.0);
+    return max(outer, inner) * on;
 }
 float shadowAt(vec3 p) {
     float sh = 0.0;
@@ -219,8 +243,8 @@ void main() {
             // deep "paint" team colours (the lighter blueCol / orangeCol are for glows and trims)
             const vec3 PAINT_B = vec3(0.012, 0.10, 0.78), PAINT_O = vec3(0.82, 0.16, 0.02);
             vec3 tc = q.y < 0.0 ? PAINT_B : PAINT_O;
-            // saturation vs the deep paint: blue half 0.65 (+30% over the orange 0.5), orange half 0.5
-            tc = mix(vec3(dot(tc, vec3(0.2126, 0.7152, 0.0722))), tc, q.y < 0.0 ? 0.65 : 0.5);
+            // saturation vs the deep paint: 0.65 on both halves (each raised +30% from 0.5, blue then orange)
+            tc = mix(vec3(dot(tc, vec3(0.2126, 0.7152, 0.0722))), tc, 0.65);
             float ax = abs(q.x), ay = abs(q.y), g = 5120.0 - ay, r = length(q);
             float fill = 0.0, dark = 0.0, white = 0.0, zone = 0.0;
             // 1) solid box in front of the goal (640 deep, +-1500) with dark ">" chevrons
@@ -316,6 +340,10 @@ void main() {
         }
     }
 
+    float bmk = ballMarkAt(p, n) * ((grid || ramp) ? 1.0 : 0.0);
+    col = mix(col, vec3(0.85), bmk * 0.85);
+    emis = mix(emis, vec3(0.40), bmk);
+
     // ---- lighting ----
     float ndl = max(dot(n, SUN_DIR), 0.0);
     vec3 amb = mix(vec3(0.12, 0.11, 0.12), vec3(0.42, 0.40, 0.46), n.z * 0.5 + 0.5);
@@ -374,7 +402,7 @@ void main() {
                            emis = glowCol * wheelGlow * 1.4; }
     else if (v_mat == 3) { base = vec3(0.50, 0.52, 0.56);    ks = 0.60; gloss = 70.0;  env = 0.40;
                            emis = glowCol * wheelGlow * 0.8; }
-    else if (v_mat == 4) { base = vec3(0.010, 0.012, 0.016); ks = 0.70; gloss = 140.0; env = 0.55; }
+    else if (v_mat == 4) { base = vec3(0.010, 0.012, 0.016); ks = 0.0;  gloss = 1.0;   env = 0.0;  }  // glass: fully matte
     else if (v_mat == 5) { base = vec3(0.9);                 ks = 0.3;  gloss = 60.0;  env = 0.2;
                            emis = vec3(1.0, 0.95, 0.80) * 1.6; }
     else if (v_mat == 6) { base = vec3(0.5, 0.02, 0.02);     ks = 0.3;  gloss = 60.0;  env = 0.2;
@@ -502,13 +530,13 @@ void main() {
     c += ballEmis;
 
     // ---- goal line: ONLY once the ball centre is inside the goal mouth and touching the line:
-    // the part of the ball past the line goes dark (its own skin at 20% light, texture still readable),
+    // the part of the ball past the line goes dark (its own skin at 12% light, texture still readable),
     // white seam at the line (RL's goal-line cue) ----
     if (inGoal > 0.5) {
         float dy = abs(v_pos.y) - 5124.25;
         float lw = max(fwidth(dy), 0.01) * 1.5;
         float past = smoothstep(-lw, lw, dy);
-        c = mix(c, c * 0.20, past);
+        c = mix(c, c * 0.12, past);
         c += vec3(1.0) * (1.0 - smoothstep(0.0, 2.2 + lw, abs(dy))) * 1.3;
     }
     f_color = vec4(to_srgb(c), 1.0);
@@ -857,6 +885,7 @@ uniform sampler2D Texture;
 uniform vec3 camPos;
 uniform float ghost;       // >0: returning-orb pass (alpha blended), value = its fade-in 0..1
 uniform float orbZ;        // object-space z where the big pad's orb starts (the gold cone below is skipped)
+uniform float orbCz;       // ghost pass: object-space z of the big orb's centre (smooth sphere normals); < -100 = none
 uniform float flash;       // 0..1 just-respawned flash
 uniform float pulse;
 uniform float charge;      // empty pad: recharge progress 0..1 (-1 = not an empty-pad draw)
@@ -875,12 +904,21 @@ void main() {
     vec3 V = normalize(camPos - v_pos);
     float ndv = abs(dot(n, V));
     if (ghost > 0.0) {
-        // The orb coming back (last ~1 s of the recharge, like RL): a translucent whitish glass sphere that
-        // fades in and warms up. Alpha blended, so it reads against the sky from the side as well as from above.
+        // The orb coming back (last ~1 s of the recharge, like RL): a BLURRY whitish orb that comes into focus.
+        // ghost 0 -> 1 over the window: the silhouette starts fully dissolved (opacity falls off from the centre
+        // to nothing at the rim; fx.pad_glows adds a soft halo spilling past it), then the falloff band narrows
+        // to a crisp edge while it firms up and warms to the orb's gold, so the pop at the respawn is small.
+        // Alpha blended, so it reads against the sky from the side as well as from above.
         if (!glowPart || v_oz < orbZ) discard;
-        float edge = pow(1.0 - ndv, 2.0);
-        vec3 c = mix(vec3(0.80, 0.85, 0.95), vec3(1.0, 0.80, 0.45), ghost * ghost) * (0.85 + 0.6 * edge);
-        f_color = vec4(to_srgb(c), ghost * (0.25 + 0.6 * edge));
+        // the orb mesh is low-poly: take the SPHERE's normal (from the orb centre) so the soft rim is smooth
+        if (orbCz > -100.0) ndv = abs(dot(normalize(vec3(v_oxy, v_oz - orbCz)), V));
+        float sharp = ghost * ghost * (3.0 - 2.0 * ghost);             // eased 0..1
+        float band = mix(1.0, 0.16, sharp);                            // width of the soft rim (1 = all soft)
+        float body = smoothstep(0.0, band, ndv);
+        vec3 c = mix(vec3(0.84, 0.88, 0.97), vec3(1.0, 0.64, 0.18), smoothstep(0.45, 1.0, sharp));
+        c *= 0.95 + 0.35 * pow(1.0 - ndv, 2.0) * sharp;                // a rim only once it is in focus
+        float a = mix(0.30, 0.90, sharp) * body * smoothstep(0.0, 0.2, ghost);
+        f_color = vec4(to_srgb(c), a);
         return;
     }
     vec3 c;
@@ -892,7 +930,7 @@ void main() {
         c += vec3(1.0, 0.85, 0.55) * pow(max(dot(R, SUN_DIR), 0.0), 28.0) * 2.4;
         c += vec3(1.0, 0.92, 0.75) * pow(max(R.z, 0.0), 8.0) * 0.55;
         c += vec3(1.0, 0.70, 0.30) * pow(1.0 - ndv, 3.0) * 1.1;
-        c += vec3(1.0, 0.85, 0.6) * 1.8 * flash;
+        c += vec3(1.0, 0.85, 0.6) * 0.45 * flash * flash;            // soft settle after the respawn
     } else {
         float ndl = max(dot(n, SUN_DIR), 0.0);
         vec3 amb = mix(vec3(0.08), vec3(0.35, 0.34, 0.38), n.z * 0.5 + 0.5);

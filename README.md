@@ -85,7 +85,9 @@ there are git-ignored, so they never get committed by accident.
   zones in front of each goal, split centre circle, team lanes), team-coloured floor-to-wall curves, translucent team
   nets, soft shadows, a low-poly valley with mountains, trees and a lake under an evening sky.
 - **Cars and ball**: team-painted cars, a two-seam ball that darkens as it crosses the goal line, shiny boost pads
-  that stay black, then whiten from the edge in as they recharge, with the orb fading back in as glass just before it respawns.
+  that stay black, then whiten from the edge in as they recharge, with the orb coming back as a blurry ghost that
+  sharpens into gold just before it respawns, and Rocket League's white ball marker on the ground under the ball
+  (a fixed outer ring and an inner ring of 4 arcs that shrinks to 4 dots as the ball rises).
 - **Ball trail**: like Rocket League, a round tube in the colour of the last team to touch the ball, shown above
   82 kph, white right behind the ball, soft at the edges and fading out over 1 s.
 - **Effects**: boost flames, supersonic trails, jump and flip flashes, sparks where a car's body (not its wheels)
@@ -96,8 +98,8 @@ there are git-ignored, so they never get committed by accident.
 - **Game events** reconstructed from the state stream: jumps, double jumps, flips (including wall dashes),
   flip resets (only when the reset is really taken on the ball), ball touches, bounces (floor, walls, posts
   and crossbar), car body impacts, bumps, demos and goals.
-- **Smooth playback**: incoming states go through a small jitter buffer, so uneven packet timing from a busy
-  trainer doesn't show as stutter.
+- **Smooth playback**: incoming states go through an adaptive jitter buffer (it deepens after a hiccup, up to
+  150 ms, and relaxes over ~45 s), so uneven packet timing from a busy trainer doesn't freeze the ball.
 - **Clips**: C saves the last 12 s by re-rendering them offscreen at 1080p60 (hardware-encoded with NVIDIA NVENC or AMD AMF when available, else on the CPU),
   so recording never slows the live view; installed sounds are mixed in. A top-left indicator shows
   "Clipping..." with a progress bar, then "Clip saved!".

@@ -80,6 +80,11 @@ class Audio:
                   ("flipreset", "reset"), ("jump", "flips"), ("doublejump", "flips"), ("dodge", "flips"),
                   ("land", "flips"))
 
+    # Calibration: what each category slider's 100% means (a slider scales this). Tuned by ear against
+    # RL: at 1.0 everything was too loud relative to the ball / impact sounds.
+    CAT_CALIB = {"ball": 1.0, "post": 1.0, "demo": 1.0, "impact": 1.0, "boost": 0.88, "engine": 0.94,
+                 "flips": 0.37, "reset": 0.66}
+
     def __init__(self):
         self.ok = False
         self.cat = {"ball": 1.0, "post": 1.0, "demo": 1.0, "impact": 1.0, "boost": 1.0, "engine": 1.0, "flips": 1.0,
@@ -251,7 +256,7 @@ class Audio:
         if c is None:
             c = next((cat for pre, cat in self.CATEGORIES if name.startswith(pre)), "")
             self._cat_cache[name] = c
-        return self.cat.get(c, 1.0)
+        return self.cat.get(c, 1.0) * self.CAT_CALIB.get(c, 1.0)
 
     def play(self, name, pos=None, gain=1.0, local=False):
         if not self.ok or self.muted or not self.active or gain <= 0.0:
@@ -266,8 +271,11 @@ class Audio:
         if ch is None:
             return None
         l, r = self._gains(pos, gain, local)
-        ch.play(snd)
+        # Volume/pan BEFORE play: a channel keeps the pan of the last sound it played, and play() releases the
+        # GIL, so the mixer could render the first block of a quiet far-away sound at the previous (loud, close)
+        # sound's level -- a sharp random "tick" on ball touches / bounces, the most frequent one-shots.
         ch.set_volume(min(1.0, l), min(1.0, r))
+        ch.play(snd)
         return ch
 
     # ---- boost loops ------------------------------------------------------------------------- #
@@ -304,7 +312,7 @@ class Audio:
                         key=lambda i: abs(self.BOOST_PITCH_STEPS[i] - 611.0 * min(1.0, speed / 2300.0)))
                 st["ch"] = self._loop_free.pop()
                 st["ch"].play(self._boost_variants[k], loops=-1, fade_ms=40)
-            l, r = self._gains(pos, (0.8 if local else 0.7) * self.cat["boost"], local)
+            l, r = self._gains(pos, (0.8 if local else 0.7) * self.cat["boost"] * self.CAT_CALIB["boost"], local)
             if st["ch"] is not None:
                 st["ch"].set_volume(min(1.0, l), min(1.0, r))
             if local and self._stream is not None:
@@ -341,7 +349,7 @@ class Audio:
         p = self._stream.model.update(car.get("dt", 1 / 60.0), car["on_ground"], car["v_fwd"],
                                       car.get("throttle"), car.get("steer"), car.get("boosting", False),
                                       car.get("speed"))
-        l, r = self._gains(car["pos"], self.ENGINE_GAIN * self.cat["engine"], True)
+        l, r = self._gains(car["pos"], self.ENGINE_GAIN * self.cat["engine"] * self.CAT_CALIB["engine"], True)
         self._stream.set_engine(p, l, r)
 
     def stop_all(self):

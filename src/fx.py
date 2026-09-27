@@ -254,16 +254,16 @@ class FX:
         self._pad_charge = items
 
     def pad_glows(self, pads, t):
-        """pads: [(x, y, is_big, active, progress)] -> soft light sprites drawn this frame (additive): a warm halo
+        """pads: [(x, y, is_big, active, progress, ghost)] -> soft light sprites drawn this frame (additive): a warm halo
         around an active orb + light on the floor; an empty pad's floor light goes deep red -> orange as it
         recharges."""
         if not pads:
             self._pad_glow = None
             return
         n = len(pads)
-        g = np.zeros((2 * n, 8), "f4")
+        g = np.zeros((3 * n, 8), "f4")
         k = 0
-        for i, (x, y, big, active, prog) in enumerate(pads):
+        for i, (x, y, big, active, prog, ghost) in enumerate(pads):
             pulse = 0.85 + 0.15 * math.sin(t * 3.0 + i * 1.7)
             if active:
                 if big:
@@ -275,6 +275,13 @@ class FX:
                 p = float(prog)
                 g[k] = (x, y, 12.0, 1.0, 0.12 + 0.43 * p, 0.03 + 0.07 * p, 0.10 + 0.28 * p,
                         (260.0 if big else 110.0)); k += 1
+                if ghost > 0.0:
+                    # the returning orb's blur: a soft whitish halo spilling past its dissolved silhouette,
+                    # shrinking and fading as the orb comes into focus
+                    gs = ghost * ghost * (3.0 - 2.0 * ghost)
+                    a = 0.22 * (1.0 - 0.75 * gs) * min(1.0, ghost * 5.0)
+                    g[k] = (x, y, 74.0 if big else 10.0, 0.85, 0.90, 1.0, a,
+                            (150.0 if big else 60.0) * (1.6 - 0.6 * gs)); k += 1
         self._pad_glow = g[:k]
 
     def add_trail(self, ribbon, lifetime, width, color, up=None):

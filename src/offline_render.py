@@ -448,7 +448,7 @@ class OfflineAudio(rl_audio.Audio):
                 st = self._boost[key] = {"key": str(key), "t_start": t, "t0": t + self.BOOST_LOOP_DELAY,
                                          "t1": None, "env": []}
                 self.loops.append(st)
-            l, r = self._gains(pos, (0.8 if local else 0.7) * self.cat["boost"], local)
+            l, r = self._gains(pos, (0.8 if local else 0.7) * self.cat["boost"] * self.CAT_CALIB["boost"], local)
             st["env"].append((t, min(1.0, l), min(1.0, r), speed))
             st["pos"], st["local"] = pos, local
         for key in [k for k in self._boost if k not in boosting]:
@@ -464,7 +464,7 @@ class OfflineAudio(rl_audio.Audio):
         if car is None:
             self.engine.append((t, None))
             return
-        l, r = self._gains(car["pos"], self.ENGINE_GAIN * self.cat["engine"], True)
+        l, r = self._gains(car["pos"], self.ENGINE_GAIN * self.cat["engine"] * self.CAT_CALIB["engine"], True)
         self.engine.append((t, {"on_ground": bool(car["on_ground"]), "v_fwd": float(car["v_fwd"]),
                                 "throttle": car.get("throttle"), "steer": car.get("steer"),
                                 "boosting": bool(car.get("boosting", False)), "speed": car.get("speed"),

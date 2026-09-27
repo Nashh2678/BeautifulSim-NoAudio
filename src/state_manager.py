@@ -75,18 +75,24 @@ def record_cam(t, idx, cam_manual):
 
 
 # ---- smooth packet playback (jitter buffer) ------------------------------------------------------- #
-# Packets arrive unevenly (a 30 Hz trainer feed measured 24..43 ms apart). Applying each one on arrival
-# and interpolating over the LAST gap made the view jump forward whenever a packet came early (the blend
-# was cut at ~60%) and freeze when one came late -- a visible hitch several times a second. Instead each
-# packet gets a smoothed playback time on a steady clock a little behind arrival (~2.5x the measured
-# jitter, a few ms to one packet), and the render thread applies it when that time comes.
+# Packets arrive unevenly (a 30 Hz trainer feed measured 24..43 ms apart, with a ~100-160 ms hiccup every few
+# seconds while training shares the machine). Each packet gets a playback time on a steady clock behind
+# arrival, and the render thread applies it when that time comes (interpolating over the steady interval).
+# The delay adapts: it jumps up to cover the latest lateness seen and decays back over ~45 s, so after the
+# first hiccup the next ones are absorbed instead of freezing the ball for 50-150 ms. Measured on a recorded
+# 4-minute training feed: visible holds 49 -> 8, for ~95 ms of display delay (irrelevant when spectating).
 class PlayoutClock:
+    LAG_DECAY = 45.0        # s: how long a hiccup keeps the buffer deep
+    LAG_MAX = 0.15          # s: never buffer more than this (a longer gap is a pause, not jitter)
+    MARGIN = 0.004
+
     def __init__(self):
         self.reset()
 
     def reset(self):
         self.T = None           # smoothed packet interval
-        self.jit = 0.0          # smoothed |interval - T|
+        self.r = None           # steady reference clock tracking the MEAN arrival time
+        self.lag = 2.0 / 30.0   # current buffer depth beyond the reference
         self.last_a = None      # last arrival time
         self.last_s = None      # last playback time
 
@@ -94,16 +100,17 @@ class PlayoutClock:
         """arrival time -> playback time (monotonic, never before arrival)."""
         T = self.T if self.T is not None else 1.0 / 30.0
         if self.last_a is None or a - self.last_a > max(0.3, 4.0 * T) or a < self.last_a:
-            s = a + 0.5 * T                               # first packet / after a pause: resync
+            self.r = a                                    # first packet / after a pause: resync
+            s = a + self.lag + self.MARGIN
         else:
             dt = a - self.last_a
-            self.T = T = dt if self.T is None else 0.95 * T + 0.05 * min(max(dt, 0.002), 0.25)
-            self.jit = 0.95 * self.jit + 0.05 * abs(dt - T)
-            lag = min(max(2.5 * self.jit, 0.15 * T), T) + 0.001
-            s = self.last_s + T
-            s += 0.1 * ((a + lag) - s)                     # drift slowly toward arrival + lag
-            s = min(max(s, a), a + 2.0 * T)                # never before arrival, never far behind
-            s = max(s, self.last_s + 0.25 * T)
+            self.T = T = dt if self.T is None else 0.98 * T + 0.02 * min(max(dt, 0.002), 0.25)
+            self.r += T
+            dev = a - self.r                              # > 0: this packet is late vs the steady clock
+            self.r += 0.02 * dev
+            self.lag = min(max(dev, self.lag * (1.0 - T / self.LAG_DECAY), 0.3 * T), self.LAG_MAX)
+            s = self.r + self.lag + self.MARGIN
+            s = max(s, a, self.last_s + 0.25 * T)         # never before arrival, always moving forward
         self.last_a, self.last_s = a, s
         return s
 

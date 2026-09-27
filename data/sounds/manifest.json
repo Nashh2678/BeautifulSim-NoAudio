@@ -320,6 +320,9 @@
    "ball_post_ping_3.ogg",
    "ball_post_ping_4.ogg",
    "ball_post_ping_5.ogg"
+  ],
+  "pad_pickup_small": [
+   "pad_pickup_small_0.ogg"
   ]
  },
  "engine_rates": [

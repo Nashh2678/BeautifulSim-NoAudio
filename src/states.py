@@ -31,6 +31,7 @@ class PhysState:
         self.prev_vel: Vector3 = Vector3((0, 0, 0))
         self.next_vel: Vector3 = Vector3((0, 0, 0))
         self.ang_vel: Vector3 = Vector3((0, 0, 0))
+        self.prev_ang_vel: Vector3 = Vector3((0, 0, 0))
         self._tp = False
 
     def __deepcopy__(self, memo):
@@ -43,14 +44,18 @@ class PhysState:
         n.has_rot = self.has_rot
         n.prev_vel = Vector3(self.prev_vel);         n.next_vel = Vector3(self.next_vel)
         n.ang_vel = Vector3(self.ang_vel)
+        n.prev_ang_vel = Vector3(self.prev_ang_vel)
         n._tp = self._tp
         return n
 
-    def rotate_with_ang_vel(self, delta_time: float):
+    def rotate_with_ang_vel(self, delta_time: float, interp_ratio: float = 1.0):
         """Spin the (rotation-less) ball by its angular velocity: Rodrigues axis-angle rotation of the
         forward/up vectors. (The previous quaternion version built a NON-unit quaternion -- scaled by the
         angle -- so at per-frame angles it collapsed to ~no rotation: the ball barely spun.)"""
-        wx, wy, wz = float(self.ang_vel[0]), float(self.ang_vel[1]), float(self.ang_vel[2])
+        # the spin of the DISPLAYED moment (between the previous and the newest packet, like the position):
+        # the newest packet's spin alone made the ball react to a touch one packet before the car got there
+        a, b, k = self.prev_ang_vel, self.ang_vel, min(max(float(interp_ratio), 0.0), 1.0)
+        wx, wy, wz = (float(a[i]) + (float(b[i]) - float(a[i])) * k for i in range(3))
         w = math.sqrt(wx * wx + wy * wy + wz * wz)
         theta = w * delta_time
         if theta < 1e-8:
@@ -85,6 +90,7 @@ class PhysState:
 
         self.prev_vel = self.next_vel
         self.next_vel = Vector3(j["vel"])
+        self.prev_ang_vel = self.ang_vel
         self.ang_vel = Vector3(j["ang_vel"])
         # cached once per packet (it was recomputed ~30x per frame by the getters below)
         TELEPORT_DIST_THRESH = 6000 * 0.15

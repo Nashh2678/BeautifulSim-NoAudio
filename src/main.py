@@ -407,11 +407,35 @@ class RSVRenderer:
         for mat, is_big, g in ghosts:
             pp["m_model"].write(mat)
             pp["orbZ"].value = 16.0 if is_big else -10.0
+            pp["orbCz"].value = 29.65 if is_big else -1000.0      # big orb centre (object space)
             pp["ghost"].value = max(0.02, g)
             self.pad_vaos_rl[self._pad_vaos[2 * is_big + 1]].render(moderngl.TRIANGLES)
         pp["ghost"].value = 0.0
         self.ctx.fbo.depth_mask = True
         self._pad_ghosts = []
+
+    BALL_MARK_TOP = 1000.0           # ball height (above the surface under it) where the inner marker ring is 4 dots
+
+    def _ball_mark(self, state, ball_pos):
+        """ballMark uniform for the arena shader: (x, y, z, height factor), or w < 0 while the ball is hidden."""
+        if getattr(state, "ball_hidden", False):
+            return (0.0, 0.0, 0.0, -1.0)
+        x, y, z = float(ball_pos[0]), float(ball_pos[1]), float(ball_pos[2])
+        # the arena surface straight below the ball (the floor, or the floor-wall curve near a wall): bisect the
+        # arena distance field between the ball centre (inside) and below the floor (outside)
+        lo, hi = -60.0, z
+        if rl_events.arena_distance((x, y, hi)) > 0.0 and rl_events.arena_distance((x, y, lo)) <= 0.0:
+            for _ in range(16):
+                m = 0.5 * (lo + hi)
+                if rl_events.arena_distance((x, y, m)) > 0.0:
+                    hi = m
+                else:
+                    lo = m
+            ground = hi
+        else:
+            ground = 0.0
+        h = max(0.0, z - 91.25 - ground)
+        return (x, y, z, min(1.0, h / self.BALL_MARK_TOP))
 
     PAD_RESPAWN_BIG = 10.0           # RL boost pad respawn times (s)
     PAD_RESPAWN_SMALL = 4.0
@@ -2028,8 +2052,10 @@ class RSVRenderer:
         _lk0 = time.perf_counter() if PERF else 0.0
         with global_state_mutex:
             state_manager.apply_due_packets(time.time())
-            if not global_state_manager.state.ball_state.has_rot:
-                global_state_manager.state.ball_state.rotate_with_ang_vel(delta_time)
+            _gs = global_state_manager.state
+            if not _gs.ball_state.has_rot:
+                _r = (time.time() - _gs.recv_time) / max(_gs.recv_interval, 1e-6)
+                _gs.ball_state.rotate_with_ang_vel(delta_time, _r)
 
             _dc0 = time.perf_counter() if PERF else 0.0
             state = copy.deepcopy(global_state_manager.state)
@@ -2131,11 +2157,11 @@ class RSVRenderer:
                 x_, y_ = float(locs[i][0]), float(locs[i][1])
                 if states[i]:
                     st_ = self._pad_spawn_t[i]
-                    pp["flash"].value = max(0.0, 1.0 - (now_p - st_) / 0.35) if st_ is not None else 0.0
+                    pp["flash"].value = max(0.0, 1.0 - (now_p - st_) / 0.30) if st_ is not None else 0.0
                     pp["pulse"].value = math.sin(now_p * 3.0 + i * 1.7)
                     pp["charge"].value = -1.0
                     self.pad_vaos_rl[self._pad_vaos[2 * is_big + 1]].render(moderngl.TRIANGLES)
-                    glows.append((x_, y_, is_big, True, 1.0))
+                    glows.append((x_, y_, is_big, True, 1.0, 0.0))
                 else:
                     pp["flash"].value = 0.0
                     pt = self._pad_pick_t[i]
@@ -2144,11 +2170,14 @@ class RSVRenderer:
                     pp["charge"].value = prog
                     pp["padR"].value = 37.8 if is_big else 20.8
                     self.pad_vaos_rl[self._pad_vaos[2 * is_big]].render(moderngl.TRIANGLES)
+                    g_ = 0.0
                     if pt is not None:
                         g_win = 1.2 if is_big else 0.7
                         left = dur - (now_p - pt)
                         if left < g_win:
-                            ghosts.append((mat, is_big, 1.0 - max(0.0, left) / g_win))
+                            g_ = 1.0 - max(0.0, left) / g_win
+                            ghosts.append((mat, is_big, g_))
+                    glows.append((x_, y_, is_big, False, prog, g_))
             self.fx.pad_glows(glows, now_p)
             self._pad_ghosts = ghosts            # translucent: drawn after the sky (see _render_pad_ghosts)
         if PERF:
@@ -2269,6 +2298,7 @@ class RSVRenderer:
         self.prog_rl_arena["casters"].write(cst.tobytes())
         self.prog_rl_arena["casterFwd"].write(cfw.tobytes())
         self.prog_rl_arena["nCasters"].value = len(casters)
+        self.prog_rl_arena["ballMark"].value = self._ball_mark(state, ball_pos)
         self.render_target.use()
         self.prog_rl_arena["detailBias"].value = 2.0 if self.config.gfx_detail == "sharp" else 1.0
         self.prog_rl_arena["passMode"].value = 0
@@ -2390,6 +2420,15 @@ class RSVRenderer:
     def _update_flip_streaks(self, i, car_pos, car_forward, car_up, delta_time, teleported, on_surface):
         ribs = self._corner_ribs.get(i)
         # airborne flips only: nothing while the wheels touch the floor / a wall (wavedash, wall dash)
+        # A landing ends the flip (a wavedash): a jump right after it must not draw streaks for the rest of
+        # the 0.6 s window. "Landed" = wheels down AFTER the car was seen airborne in this flip (the rendered
+        # state lags the event a little, so the take-off frames can still read on_ground).
+        if time.time() < self._flip_until.get(i, 0.0):
+            seen = self.__dict__.setdefault("_flip_airseen", {})
+            if not on_surface:
+                seen[i] = True
+            elif seen.get(i):
+                self._flip_until[i] = 0.0
         flipping = time.time() < self._flip_until.get(i, 0.0) and not on_surface
         if ribs is None:
             if not flipping:
@@ -2454,6 +2493,7 @@ class RSVRenderer:
         stall = bool(ev.get("stall"))              # a stall: flip input, no impulse and no rotation
         if k == "dodge" and car >= 0 and not stall:
             self._flip_until[car] = time.time() + self.FLIP_STREAK_EMIT
+            self.__dict__.setdefault("_flip_airseen", {})[car] = False
         if k in ("jump", "doublejump", "dodge"):
             a.play(k + sfx, pos, 0.9, local)
             if not stall:
@@ -2520,7 +2560,8 @@ class RSVRenderer:
             self.fx.sparks(pos, ev.get("normal", (0, 0, 1)), ev.get("strength", 0.0))
         elif k == "pad":
             if local:                                  # RL only plays pickups for your own car
-                a.play("pad_pickup", pos, 0.9, True)
+                # big pad = Play_Boost_Pickup_Pad_Local, small pad = Play_Boost_Pickup_Pill_Local
+                a.play("pad_pickup" if ev.get("big") else "pad_pickup_small", pos, 0.9, True)
         elif k == "goal":
             self._goal_banner = (int(ev.get("team", 0)) & 1, time.time())
             a.play("goal_explosion_default", pos, 1.0, True)
