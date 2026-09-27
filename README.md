@@ -85,7 +85,7 @@ there are git-ignored, so they never get committed by accident.
   zones in front of each goal, split centre circle, team lanes), team-coloured floor-to-wall curves, translucent team
   nets, soft shadows, a low-poly valley with mountains, trees and a lake under an evening sky.
 - **Cars and ball**: team-painted cars, a two-seam ball that darkens as it crosses the goal line, shiny boost pads
-  whose rim ring lights up as they recharge, with the orb fading back in as glass just before it respawns.
+  that stay black, then whiten from the edge in as they recharge, with the orb fading back in as glass just before it respawns.
 - **Ball trail**: like Rocket League, a round tube in the colour of the last team to touch the ball, shown above
   82 kph, white right behind the ball, soft at the edges and fading out over 1 s.
 - **Effects**: boost flames, supersonic trails, jump and flip flashes, sparks where a car's body (not its wheels)
