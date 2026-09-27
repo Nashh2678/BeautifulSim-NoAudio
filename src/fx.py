@@ -23,6 +23,7 @@ from rl_shaders import PARTICLE_VERT, PARTICLE_FRAG, RING_VERT, RING_FRAG, TUBE_
 # under the middle of the car, 120 ms linear fade. (Octane: ~118 uu long; wheel midpoint ~9 uu ahead of
 # the origin; wheel contact plane 17 uu below it -- 14 keeps it just off the ball it sits on.)
 DEMO_SCALE = 1.2          # demolition explosion size
+DEMO_TIME = 1.5           # demolition explosion duration (played this much slower)
 GOAL_FX_SPEED = 0.7       # goal explosion playback speed
 RESET_DISC_RADIUS = 59.0
 RESET_DISC_FWD = 9.0
@@ -219,6 +220,7 @@ class FX:
         self.trail_vbo = ctx.buffer(reserve=8192 * 7 * 4, dynamic=True)
         self.trail_vao = ctx.vertex_array(self.trail_prog, [(self.trail_vbo, "3f 4f", "in_pos", "in_col")])
         self._pad_glow = None
+        self._pad_charge = []
         self._trails = []
         self._tubes = []
         self.tube_prog = ctx.program(vertex_shader=TUBE_VERT, fragment_shader=TUBE_FRAG)
@@ -234,33 +236,49 @@ class FX:
         self.cam_up = np.array([0.0, 0.0, 1.0], "f4")
 
     def pad_pickup(self, pos, big):
-        """Big boost pad picked up: a short, subtle spray of golden sparks (no floor ring).
-        Small pads get no pickup effect at all (RL only flashes the big canisters)."""
-        if not big:
-            return
-        pos = np.asarray(pos, "f4").copy(); pos[2] = 40.0
-        n = 10
-        d = self._rand_dirs(n); d[:, 2] = np.abs(d[:, 2]) * 2.5 + 0.8
+        """Boost pad picked up: a warm flash where the orb was, a quick golden ring spreading over the floor and
+        a burst of sparks rising out of the pad. Small pads get the same, smaller."""
+        k = 1.0 if big else 0.55
+        rng = self._rng
+        base = np.asarray(pos, "f4").copy(); base[2] = 10.0
+        c = base.copy(); c[2] = 74.0 if big else 22.0
+        self.add.spawn(c[None, :], np.zeros((1, 3), "f4"), np.array([0.20], "f4"), np.array([230.0 * k], "f4"),
+                       90.0 * k, np.array([1.0, 0.86, 0.48, 0.95], "f4"), np.array([1.0, 0.50, 0.10, 0.0], "f4"))
+        self.ring(base, (0, 0, 1), 40.0 * k, 210.0 * k, 0.38, 0.10, (1.0, 0.62, 0.18, 0.9), core=(1.0, 0.95, 0.8))
+        n = 22 if big else 9
+        d = self._rand_dirs(n); d[:, 2] = np.abs(d[:, 2]) * 2.2 + 0.6
         d /= np.linalg.norm(d, axis=1, keepdims=True)
-        self.add.spawn(np.repeat(pos[None, :], n, 0), d * self._rng.uniform(200, 520, (n, 1)),
-                       self._rng.uniform(0.2, 0.38, n), self._rng.uniform(5, 9, n), 1.5,
-                       np.array([1.0, 0.85, 0.4, 0.9], "f4"), np.array([1.0, 0.45, 0.05, 0.0], "f4"), drag=3.0, grav=400.0)
+        self.add.spawn(np.repeat(c[None, :], n, 0), d * rng.uniform(260.0, 720.0, (n, 1)) * (0.6 + 0.4 * k),
+                       rng.uniform(0.30, 0.60, n), rng.uniform(6.0, 11.0, n) * max(k, 0.7), 2.0,
+                       np.array([1.0, 0.88, 0.45, 1.0], "f4"), np.array([1.0, 0.40, 0.05, 0.0], "f4"), drag=2.5, grav=500.0)
+
+    def pad_charge(self, items):
+        """items: [(x, y, z, radius, progress 0..1)] for every EMPTY pad -> recharge rings drawn this frame: a ring
+        on the pad's rim whose lit arc sweeps around as it recharges, deep red -> gold."""
+        self._pad_charge = items
 
     def pad_glows(self, pads, t):
-        """pads: [(x, y, is_big)] for ACTIVE pads -> glow sprites drawn this frame (additive)."""
+        """pads: [(x, y, is_big, active, progress)] -> soft light sprites drawn this frame (additive): a warm halo
+        around an active orb + light on the floor; an empty pad's floor light goes deep red -> orange as it
+        recharges."""
         if not pads:
             self._pad_glow = None
             return
         n = len(pads)
         g = np.zeros((2 * n, 8), "f4")
         k = 0
-        for i, (x, y, big) in enumerate(pads):
+        for i, (x, y, big, active, prog) in enumerate(pads):
             pulse = 0.85 + 0.15 * math.sin(t * 3.0 + i * 1.7)
-            if big:
-                g[k] = (x, y, 72.0, 1.0, 0.62, 0.15, 0.85 * pulse, 170.0 * pulse); k += 1   # orb
-                g[k] = (x, y, 12.0, 1.0, 0.55, 0.10, 0.45, 300.0); k += 1                     # floor glow
+            if active:
+                if big:
+                    g[k] = (x, y, 74.0, 1.0, 0.62, 0.15, 0.30 * pulse, 190.0 * pulse); k += 1   # orb halo
+                    g[k] = (x, y, 12.0, 1.0, 0.55, 0.10, 0.30, 300.0); k += 1                     # floor light
+                else:
+                    g[k] = (x, y, 10.0, 1.0, 0.62, 0.15, 0.30 * pulse, 110.0); k += 1
             else:
-                g[k] = (x, y, 10.0, 1.0, 0.62, 0.15, 0.55 * pulse, 110.0); k += 1
+                p = float(prog)
+                g[k] = (x, y, 12.0, 1.0, 0.12 + 0.43 * p, 0.03 + 0.07 * p, 0.10 + 0.28 * p,
+                        (260.0 if big else 110.0)); k += 1
         self._pad_glow = g[:k]
 
     def add_trail(self, ribbon, lifetime, width, color, up=None):
@@ -279,11 +297,12 @@ class FX:
         pts = [p for p in ribbon.points if p.connected]
         if len(pts) < 2:
             return
+        base = tuple(color[:3])
         self._tubes.append((np.asarray([tuple(p.pos) for p in pts], "f4"),
                             np.asarray([p.time_active for p in pts], "f4"),
                             np.asarray([getattr(p, "k", 1.0) for p in pts], "f4"), lifetime, radius,
-                            np.asarray(color[:3], "f4"), float(color[3]) if len(color) > 3 else 1.0,
-                            white_from, white_len))
+                            np.asarray([getattr(p, "col", None) or base for p in pts], "f4"),   # colour per point
+                            float(color[3]) if len(color) > 3 else 1.0, white_from, white_len))
 
     def _render_tubes(self, m_vp_bytes, cam):
         if not self._tubes:
@@ -299,7 +318,7 @@ class FX:
             t = np.clip(age / life, 0.0, 1.0)
             w = 1.0 - np.clip((dist - w_from) / max(w_len, 1e-3), 0.0, 1.0) if w_len > 0 else np.zeros(n, "f4")
             rgba = np.empty((n, 4), "f4")
-            rgba[:, 0:3] = rgb[None, :] * (1.0 - w[:, None]) + w[:, None]
+            rgba[:, 0:3] = rgb * (1.0 - w[:, None]) + w[:, None]
             rgba[:, 3] = a0 * (1.0 - t) * kpt              # kpt: per-point strength at emission
             view = cam[None, :] - pos
             side = np.cross(seg, view)
@@ -424,6 +443,26 @@ class FX:
         g.arcw = arcw
         self.rings.append(g)
 
+    def _render_pad_charge(self, m_vp_bytes):
+        ctx, rp = self.ctx, self.ring_prog
+        rp["m_vp"].write(m_vp_bytes)
+        ctx.disable(moderngl.CULL_FACE)
+        ctx.blend_func = moderngl.ONE, moderngl.ONE_MINUS_SRC_ALPHA
+        rp["mode"].value = 4.0
+        rp["axisU"].write(np.array([1.0, 0.0, 0.0], "f4").tobytes())
+        rp["axisV"].write(np.array([0.0, 1.0, 0.0], "f4").tobytes())
+        rp["coreCol"].value = (1.0, 0.92, 0.65)
+        for x, y, z, rad, prog in self._pad_charge:
+            p = 0.0 if prog is None else float(prog)
+            rp["center"].write(np.array([x, y, z], "f4").tobytes())
+            rp["radius"].value = float(rad)
+            rp["width"].value = 0.15
+            rp["fill"].value = p
+            rp["color"].value = (0.85 + 0.15 * p, 0.10 + 0.50 * p, 0.03 + 0.07 * p, 0.95)
+            self.ring_vao.render(moderngl.TRIANGLES)
+        ctx.enable(moderngl.CULL_FACE)
+        self._pad_charge = []
+
     def _render_reset_discs(self, m_vp_bytes):
         """Flip-reset discs on their car's wheel plane, depth-tested: whatever the car or the ball hides
         from the camera is not drawn."""
@@ -485,16 +524,21 @@ class FX:
             # DEMO_SCALE: the whole explosion 20% bigger (sizes, spread speeds, offsets, gravity, ring radii);
             # same timing, same look
             S = DEMO_SCALE
+            T = DEMO_TIME
+
+            def _sp(sys_, p, v, life, s0, s1, c0, c1, drag=0.0, grav=0.0):
+                # DEMO_TIME: the same explosion played 1.5x slower -- same shapes and reach, lasts 1.5x as long
+                sys_.spawn(p, v / T, life * T, s0, s1, c0, c1, drag=drag / T, grav=grav / (T * T))
             vel = np.asarray(ev.get("vel", (0, 0, 0)), "f4") * 0.25
             pos = pos.copy(); pos[2] = max(float(pos[2]), 60.0)
             rng = self._rng
             # 1) blinding flash
-            self.add.spawn(pos[None, :], vel[None, :], np.array([0.14], "f4"), np.array([650.0 * S], "f4"),
+            _sp(self.add, pos[None, :], vel[None, :], np.array([0.14], "f4"), np.array([650.0 * S], "f4"),
                            1200.0 * S, np.array([1, 0.97, 0.85, 1.0], "f4"), np.array([1, 0.6, 0.2, 0.0], "f4"))
             # 2) hot core: bright yellow -> orange puffs that STAY fire-coloured while they fade
             n = 70
             d = self._rand_dirs(n); d[:, 2] = np.abs(d[:, 2]) * 0.8 + 0.2
-            self.alpha.spawn(np.repeat(pos[None, :], n, 0) + d * rng.uniform(0, 50 * S, (n, 1)),
+            _sp(self.alpha, np.repeat(pos[None, :], n, 0) + d * rng.uniform(0, 50 * S, (n, 1)),
                              d * rng.uniform(300 * S, 950 * S, (n, 1)) + vel,
                              rng.uniform(0.35, 0.65, n), rng.uniform(170 * S, 250 * S, n), 360.0 * S,
                              np.array([1.0, 0.86, 0.45, 1.0], "f4"), np.array([1.0, 0.38, 0.06, 0.0], "f4"),
@@ -502,7 +546,7 @@ class FX:
             # 3) outer fire: orange -> deep red, a little longer
             n = 60
             d = self._rand_dirs(n); d[:, 2] = np.abs(d[:, 2]) * 0.9 + 0.1
-            self.alpha.spawn(np.repeat(pos[None, :], n, 0) + d * rng.uniform(20 * S, 90 * S, (n, 1)),
+            _sp(self.alpha, np.repeat(pos[None, :], n, 0) + d * rng.uniform(20 * S, 90 * S, (n, 1)),
                              d * rng.uniform(450 * S, 1100 * S, (n, 1)) + vel,
                              rng.uniform(0.5, 0.9, n), rng.uniform(140 * S, 200 * S, n), 320.0 * S,
                              np.array([1.0, 0.55, 0.12, 0.9], "f4"), np.array([0.55, 0.10, 0.03, 0.0], "f4"),
@@ -510,26 +554,26 @@ class FX:
             # 4) embers: long-lived bright sparks that arc and fall
             n = 80
             d = self._rand_dirs(n); d[:, 2] = np.abs(d[:, 2]) * 1.2 + 0.2
-            self.add.spawn(np.repeat(pos[None, :], n, 0), d * rng.uniform(700 * S, 2200 * S, (n, 1)) + vel,
+            _sp(self.add, np.repeat(pos[None, :], n, 0), d * rng.uniform(700 * S, 2200 * S, (n, 1)) + vel,
                            rng.uniform(0.6, 1.4, n), rng.uniform(7 * S, 13 * S, n), 3.0 * S,
                            np.array([1, 0.92, 0.6, 1.0], "f4"), np.array([1, 0.35, 0.05, 0.0], "f4"),
                            drag=0.9, grav=900.0 * S)
             # 5) debris chunks: dark bits of car flung out
             n = 18
             d = self._rand_dirs(n); d[:, 2] = np.abs(d[:, 2]) + 0.3
-            self.alpha.spawn(np.repeat(pos[None, :], n, 0), d * rng.uniform(600 * S, 1500 * S, (n, 1)) + vel,
+            _sp(self.alpha, np.repeat(pos[None, :], n, 0), d * rng.uniform(600 * S, 1500 * S, (n, 1)) + vel,
                              rng.uniform(0.7, 1.2, n), rng.uniform(16 * S, 26 * S, n), 12.0 * S,
                              np.array([0.10, 0.10, 0.11, 1.0], "f4"), np.array([0.08, 0.08, 0.09, 0.0], "f4"),
                              drag=0.6, grav=1300.0 * S)
             # 6) smoke: light grey, thin, rising and spreading, after the fire
             n = 28
             d = self._rand_dirs(n); d[:, 2] = np.abs(d[:, 2])
-            self.alpha.spawn(np.repeat(pos[None, :], n, 0) + d * 80 * S, d * 220 * S + np.array([0, 0, 260 * S], "f4"),
+            _sp(self.alpha, np.repeat(pos[None, :], n, 0) + d * 80 * S, d * 220 * S + np.array([0, 0, 260 * S], "f4"),
                              rng.uniform(1.2, 2.0, n), 140.0 * S, 420.0 * S, np.array([0.50, 0.47, 0.45, 0.30], "f4"),
                              np.array([0.42, 0.42, 0.44, 0.0], "f4"), drag=1.6)
             # 7) shockwave rings (ground + vertical)
-            self.ring(pos, (0, 0, 1), 40.0 * S, 760.0 * S, 0.35, 0.07, (1.0, 0.65, 0.25, 0.9), core=(1.0, 0.95, 0.85))
-            self.ring(pos, (0, 1, 0), 40.0 * S, 520.0 * S, 0.28, 0.06, (1.0, 0.75, 0.35, 0.7), core=(1.0, 0.95, 0.85),
+            self.ring(pos, (0, 0, 1), 40.0 * S, 760.0 * S, 0.35 * T, 0.07, (1.0, 0.65, 0.25, 0.9), core=(1.0, 0.95, 0.85))
+            self.ring(pos, (0, 1, 0), 40.0 * S, 520.0 * S, 0.28 * T, 0.06, (1.0, 0.75, 0.35, 0.7), core=(1.0, 0.95, 0.85),
                       billboard=True)
         elif k == "goal":
             # GOAL_FX_SPEED: the goal explosion plays at 70% speed -- same shapes and extent, just slower
@@ -547,22 +591,24 @@ class FX:
             self.ring(pos, (0, 0, 1), 60.0, 1300.0, 0.8 / v, 0.05, (*col, 0.8), core=(1, 1, 1), delay=0.08 / v)
 
     def sparks(self, pos, normal, strength):
-        """Sparks where the car BODY touched something (ball, arena, another car): 2-4 small orange specks
-        thrown out along the surface, falling and cooling to red. Count / speed scale with the impact."""
+        """Sparks where the car BODY touched something (ball, arena, another car): a small warm flash and 4-7
+        orange specks thrown out along the surface, falling and cooling to red. Count / speed scale with the impact."""
         rng = self._rng
         pos = np.asarray(pos, "f4")
         nrm = np.asarray(normal, "f4")
         ln = float(np.linalg.norm(nrm))
         nrm = nrm / ln if ln > 1e-4 else np.array([0, 0, 1], "f4")
         s = float(np.clip((strength - 100.0) / 1400.0, 0.0, 1.0))
-        n = 2 + int(round(2 * s))                            # 2-4 small specks, subtle
+        self.add.spawn(pos[None, :], np.zeros((1, 3), "f4"), np.array([0.06], "f4"), np.array([22.0 + 22.0 * s], "f4"),
+                       8.0, np.array([1.0, 0.62, 0.22, 0.75], "f4"), np.array([1.0, 0.30, 0.05, 0.0], "f4"))
+        n = 4 + int(round(3 * s))                            # 4-7 specks
         d = self._rand_dirs(n)
         d -= nrm[None, :] * (d @ nrm)[:, None] * 0.7        # mostly along the surface...
         d += nrm[None, :] * 0.45                             # ...and away from it
         d /= np.linalg.norm(d, axis=1, keepdims=True) + 1e-6
-        self.add.spawn(np.repeat(pos[None, :], n, 0), d * rng.uniform(350.0, 900.0, (n, 1)) * (0.7 + 0.5 * s),
-                       rng.uniform(0.15, 0.35, n), rng.uniform(3.0, 4.5, n), 1.0,
-                       np.array([1.0, 0.45, 0.10, 0.9], "f4"), np.array([0.85, 0.12, 0.03, 0.0], "f4"),
+        self.add.spawn(np.repeat(pos[None, :], n, 0), d * rng.uniform(400.0, 1000.0, (n, 1)) * (0.7 + 0.5 * s),
+                       rng.uniform(0.25, 0.50, n), rng.uniform(5.0, 8.0, n), 1.5,
+                       np.array([1.0, 0.72, 0.28, 1.0], "f4"), np.array([0.90, 0.15, 0.03, 0.0], "f4"),
                        drag=1.6, grav=1100.0)
 
     # ---------------------------------------------------------------------------------------- #
@@ -736,6 +782,8 @@ class FX:
                 if g.ontop:
                     ctx.enable(moderngl.DEPTH_TEST)
             ctx.enable(moderngl.CULL_FACE)
+        if self._pad_charge:
+            self._render_pad_charge(m_vp_bytes)
         if self.reset_discs:
             self._render_reset_discs(m_vp_bytes)
         ctx.fbo.depth_mask = True

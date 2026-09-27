@@ -388,6 +388,34 @@ class RSVRenderer:
             self._draw_label(pct, m + pw - 18.0 * s - wpx, cy - cap * 0.4, cap * 0.8, (1.0, 1.0, 1.0, 0.75 * a), ortho)
         self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
 
+    def _render_pad_ghosts(self, vp_bytes, cam_bytes):
+        """The returning orbs of recharging pads. Translucent, so drawn AFTER the sky: drawn with the pads, the sky
+        (which only fills pixels nothing wrote depth to) painted over them wherever the sky was behind -- they were
+        only visible from above, against the pad."""
+        ghosts = getattr(self, "_pad_ghosts", None)
+        if not ghosts:
+            return
+        pp = self.prog_pad
+        pp["m_vp"].write(vp_bytes)
+        pp["camPos"].write(cam_bytes)
+        self.t_boostpad.use(location=0)
+        pp["Texture"].value = 0
+        pp["flash"].value = 0.0
+        self.render_target.use()
+        self.ctx.fbo.depth_mask = False
+        self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
+        for mat, is_big, g in ghosts:
+            pp["m_model"].write(mat)
+            pp["orbZ"].value = 16.0 if is_big else -10.0
+            pp["ghost"].value = max(0.02, g)
+            self.pad_vaos_rl[self._pad_vaos[2 * is_big + 1]].render(moderngl.TRIANGLES)
+        pp["ghost"].value = 0.0
+        self.ctx.fbo.depth_mask = True
+        self._pad_ghosts = []
+
+    PAD_RESPAWN_BIG = 10.0           # RL boost pad respawn times (s)
+    PAD_RESPAWN_SMALL = 4.0
+
     GOAL_BANNER_S = 3.0          # on screen after a goal (longer while a goal celebration hides the ball)
 
     def _banner_textures(self, team):
@@ -1323,7 +1351,20 @@ class RSVRenderer:
         self.ctx.enable(moderngl.DEPTH_TEST)
         self.ctx.enable(moderngl.CULL_FACE)
 
-    def render_supersonic_streaks(self, width, height, intensity, t):
+    def _heading_point(self, vel, width, height):
+        """Screen point the car is heading to (its velocity's vanishing point), or None (no speed / behind)."""
+        vp, cam = getattr(self, "_frame_vp", None), getattr(self, "_frame_cam", None)
+        v = np.asarray(tuple(vel), "f8")
+        sp = float(np.linalg.norm(v))
+        if vp is None or cam is None or sp < 1.0:
+            return None
+        p = np.asarray(tuple(cam), "f8") + v / sp * 20000.0
+        clip = np.array([p[0], p[1], p[2], 1.0]) @ np.asarray(vp, "f8")
+        if clip[3] <= 1e-3:
+            return None
+        return ((clip[0] / clip[3] * 0.5 + 0.5) * width, (0.5 - clip[1] / clip[3] * 0.5) * height)
+
+    def render_supersonic_streaks(self, width, height, intensity, t, foe=None):
         """A FIXED number of long, thin white DARTS that live a DESYNCED animated lifecycle: each
         fades IN at a random perimeter spot, grows to full size, then fades OUT and RESPAWNS
         somewhere else — never overlapping a live neighbour. Per-dart random lifespan (0.3-0.8s) so
@@ -1354,8 +1395,10 @@ class RSVRenderer:
         self.ctx.disable(moderngl.CULL_FACE)
 
         min_dim = min(width, height)
-        cx, cy = width * 0.5, height * 0.5
-        N = 24                                          # fixed dart count on screen
+        # darts aim at where the car is HEADING (its velocity's vanishing point on screen), so they line up with
+        # its motion like 3D streaks at 2D cost; the screen centre if that point is unknown
+        cx, cy = foe if foe is not None else (width * 0.5, height * 0.5)
+        N = 10                                          # fixed dart count on screen (rarer)
         dart_len = min_dim * 0.20                        # long
         min_gap = max(dart_len * 0.55, min_dim * 0.085)  # min perimeter distance between live darts
 
@@ -1387,7 +1430,7 @@ class RSVRenderer:
             #   (apex TOTAL 1.5-2.0deg) -> darts read as slightly different thicknesses, not uniform.
 
         def _new_opacity():
-            return random.uniform(0.5, 0.9)              # per-dart random opacity, re-rolled on respawn
+            return random.uniform(0.18, 0.38)            # per-dart random opacity (faint), re-rolled on respawn
 
         # Lazy/persistent init. Re-seed if the count or the window perimeter changed (resize).
         # dart record: [s_pos, birth, period, half_w_ratio, opacity_mult]
@@ -1989,6 +2032,7 @@ class RSVRenderer:
         lookat = Matrix44(fastvec.look_at(camera_pos, camera_target_pos, (0.0, 0.0, 1.0)))
         vp = (proj * lookat).astype('f4')
         vp_bytes = vp.tobytes()
+        self._frame_vp, self._frame_cam = vp, camera_pos
         cam_bytes = Vector3(camera_pos).astype('f4').tobytes()
 
         self.pr_camera_pos.write(cam_bytes)
@@ -2036,35 +2080,36 @@ class RSVRenderer:
             pp["Texture"].value = 0
             pp["ghost"].value = 0.0
             self.render_target.use()
-            ghosts = []
+            # Recharge (RL): the empty pad's rim ring lights up as it recharges (the lit arc sweeps round, deep red
+            # -> gold, so you can see how long is left) and in the last ~1 s the orb fades back in as a whitish
+            # glass sphere before it pops back gold.
+            ghosts, charge, glows = [], [], []
             for i in range(n_p):
                 is_big, mat = cache[i]
                 pp["m_model"].write(mat)
+                x_, y_ = float(locs[i][0]), float(locs[i][1])
                 if states[i]:
                     st_ = self._pad_spawn_t[i]
                     pp["flash"].value = max(0.0, 1.0 - (now_p - st_) / 0.35) if st_ is not None else 0.0
                     pp["pulse"].value = math.sin(now_p * 3.0 + i * 1.7)
                     self.pad_vaos_rl[self._pad_vaos[2 * is_big + 1]].render(moderngl.TRIANGLES)
+                    glows.append((x_, y_, is_big, True, 1.0))
                 else:
                     pp["flash"].value = 0.0
                     self.pad_vaos_rl[self._pad_vaos[2 * is_big]].render(moderngl.TRIANGLES)
                     pt = self._pad_pick_t[i]
+                    dur = self.PAD_RESPAWN_BIG if is_big else self.PAD_RESPAWN_SMALL
+                    prog = 0.0 if pt is None else min(1.0, (now_p - pt) / dur)     # unknown start: dim ring
+                    charge.append((x_, y_, 8.9 if is_big else 8.4, 94.0 if is_big else 51.5, prog))
+                    glows.append((x_, y_, is_big, False, prog))
                     if pt is not None:
-                        dur = 10.0 if is_big else 4.0
-                        since = now_p - pt
-                        if since > 0.4:
-                            ghosts.append((mat, is_big, min(1.0, (since - 0.4) / (dur - 0.4))))
-            if ghosts:                                          # recharge holograms (additive fill-up)
-                self.ctx.fbo.depth_mask = False
-                self.ctx.blend_func = moderngl.ONE, moderngl.ONE
-                for mat, is_big, g in ghosts:
-                    pp["m_model"].write(mat)
-                    pp["ozRange"].value = (3.3, 42.4) if is_big else (3.1, 7.0)
-                    pp["ghost"].value = max(0.02, g)
-                    self.pad_vaos_rl[self._pad_vaos[2 * is_big + 1]].render(moderngl.TRIANGLES)
-                pp["ghost"].value = 0.0
-                self.ctx.fbo.depth_mask = True
-                self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
+                        g_win = 1.2 if is_big else 0.7
+                        left = dur - (now_p - pt)
+                        if left < g_win:
+                            ghosts.append((mat, is_big, 1.0 - max(0.0, left) / g_win))
+            self.fx.pad_charge(charge)
+            self.fx.pad_glows(glows, now_p)
+            self._pad_ghosts = ghosts            # translucent: drawn after the sky (see _render_pad_ghosts)
         if PERF:
             self._perf_pads += time.perf_counter() - _p0
 
@@ -2206,6 +2251,7 @@ class RSVRenderer:
             self.ctx.depth_func = "<"
         self.ctx.fbo.depth_mask = True
         self.ctx.enable(moderngl.CULL_FACE)
+        self._render_pad_ghosts(vp_bytes, cam_bytes)
         # translucent glass walls + ceiling (premultiplied alpha, no depth write) so the stadium,
         # skyline and anything behind a wall show through like in game
         self.prog_rl_arena["passMode"].value = 1
@@ -2314,7 +2360,7 @@ class RSVRenderer:
             if teleported:
                 rib.points.clear()
             if len(rib.points) > 1:
-                self.fx.add_trail(rib, self.FLIP_STREAK_LIFE, 0.9, (1.0, 1.0, 1.0, 0.22))
+                self.fx.add_trail(rib, self.FLIP_STREAK_LIFE, 0.9, (1.0, 1.0, 1.0, 0.15))
         if not flipping and not any(r.points for r in ribs):
             del self._corner_ribs[i]
 
@@ -2328,19 +2374,32 @@ class RSVRenderer:
         since = now - getattr(self, "_trail_fast_t", -1e9)
         k = max(0.0, 1.0 - since / self.BALL_TRAIL_TAIL) if usable else 0.0
         on = k > 0.0
-        if on and not self._ball_trail_on and self.ball_trail.points:
+        restart = on and not self._ball_trail_on
+        if restart and self.ball_trail.points:
             self.ball_trail.points.clear()                     # restart: never bridge across the gap
         self._ball_trail_on = on
         self.ball_trail.update(on, 0, Vector3(ball_pos), Vector3((0.0, 0.0, 0.0)), self.BALL_TRAIL_LIFE, delta_time)
+        # Touch-aware colour: each point keeps the colour it was emitted with; after a touch by the other team
+        # the NEW points blend to its colour over ~0.1 s (the trail already drawn doesn't change retroactively).
+        tt = getattr(self, "_trail_touch_team", None)
+        tt = (int(team) & 1) if tt is None and team is not None else tt
+        target = np.asarray(self.TEAM_TRAIL[tt if tt is not None else 0], "f4")
+        col = getattr(self, "_trail_col", None)
+        if col is None or restart or not self.ball_trail.points:
+            col = target.copy()
+        else:
+            col = col + (target - col) * (1.0 - math.exp(-max(delta_time, 0.0) / 0.035))
+        self._trail_col = col
         if on and self.ball_trail.points:
             self.ball_trail.points[0].k = k                    # newest point: emission strength
+            self.ball_trail.points[0].col = (float(col[0]), float(col[1]), float(col[2]))
         if hidden or ball_phys.is_teleporting():
             self.ball_trail.points.clear()
         if len(self.ball_trail.points) > 1 and team is not None:
             self._trail_team = int(team) & 1
         if len(self.ball_trail.points) > 1:
             self.fx.add_tube(self.ball_trail, self.BALL_TRAIL_LIFE, self.BALL_TRAIL_RADIUS,
-                             (*self.TEAM_TRAIL[getattr(self, "_trail_team", 0)], 0.55),
+                             (*[float(c) for c in self._trail_col], 0.55),
                              white_from=91.25, white_len=50.0)
 
     def _handle_event(self, ev, spectated):
@@ -2366,6 +2425,8 @@ class RSVRenderer:
             g = min(1.0, max(0.25, (ev.get("strength", 0.0) - 140.0) / 900.0))
             a.play("land" + sfx, pos, g, local)
         elif k == "ball_hit":
+            if ev.get("team") is not None:
+                self._trail_touch_team = int(ev["team"]) & 1   # trail colour follows the touch as it is SHOWN
             # RL doesn't re-trigger the hit sound on every tiny dribble contact: soft touches are
             # skipped, and hits closer than 0.15 s play only if clearly harder than the last one.
             if not self._sound_gate("ball_hit", "ball_hit", ev.get("strength", 0.0)):
@@ -2439,7 +2500,10 @@ class RSVRenderer:
                 if speed >= self.SUPERSONIC_SPEED:
                     ss_target = float(np.clip((speed - self.SUPERSONIC_SPEED) / 200.0, 0.0, 1.0)) * 0.5 + 0.5
                 self.render_boost_hud(width, height, spectated_car.boost_amount, spectated_car.team_num)
-        self.render_supersonic_streaks(width, height, ss_target, total_time)
+        foe = None
+        if spectated >= 0 and (ss_target > 0.0 or getattr(self, "_ss_activation", 0.0) > 0.01):
+            foe = self._heading_point(state.car_states[spectated].phys.get_vel(interp_ratio), width, height)
+        self.render_supersonic_streaks(width, height, ss_target, total_time, foe)
         self.render_pai_hud(width, height, getattr(state_manager, "gail_hud", None))
         self.render_scoreboard_hud(width, height, getattr(state_manager, "scoreboard", None))
         self.render_goal_banner(width, height, state)

@@ -675,6 +675,17 @@ out vec4 f_color;
 void main() {
     float r = length(v_xy);
     if (r > 1.0) discard;
+    if (mode > 3.5) {                                   // boost pad recharge ring: lit arc = progress
+        float aa = max(fwidth(r), 1e-3) * 1.5;
+        float band = smoothstep(1.0 - width - aa, 1.0 - width, r) * (1.0 - smoothstep(1.0 - aa, 1.0, r));
+        float ang = fract(atan(v_xy.x, v_xy.y) / 6.2831853 + 1.0);      // 0 at +v, clockwise
+        float lit = 1.0 - smoothstep(fill - 0.004, fill + 0.004, ang);
+        float head = exp(-pow((ang - fill) / 0.02, 2.0)) * step(fill, 0.995);   // bright leading edge
+        float a = color.a * band * (0.16 + 0.84 * lit + 0.6 * head);
+        vec3 c = mix(color.rgb * 0.35, color.rgb, lit) + coreCol * head * 0.8;
+        f_color = vec4(c * a, a);
+        return;
+    }
     if (mode > 2.5) {                                   // flip-reset disc (RL): clear centre, whiter
         float aa = max(fwidth(r), 1e-3) * 1.5;          // towards the edge (~r^2), crisp white rim
         float disc = 1.0 - smoothstep(1.0 - aa, 1.0, r);
@@ -842,8 +853,8 @@ PAD_FRAG = """
 """ + COMMON + """
 uniform sampler2D Texture;
 uniform vec3 camPos;
-uniform float ghost;       // >0: recharge hologram pass, value = recharge progress 0..1 (additive)
-uniform vec2 ozRange;      // object-space z of the glowing part (bottom, top)
+uniform float ghost;       // >0: returning-orb pass (alpha blended), value = its fade-in 0..1
+uniform float orbZ;        // object-space z where the big pad's orb starts (the gold cone below is skipped)
 uniform float flash;       // 0..1 just-respawned flash
 uniform float pulse;
 in vec3 v_pos;
@@ -857,26 +868,25 @@ void main() {
     bool glowPart = sat > 0.25;
     vec3 n = normalize(v_nrm);
     vec3 V = normalize(camPos - v_pos);
+    float ndv = abs(dot(n, V));
     if (ghost > 0.0) {
-        // Recharge: a faint glassy outline of the canister that fills bottom -> top with a warm glow,
-        // a bright scanline at the fill level. Additive, so it can only brighten (never a dark blob).
-        if (!glowPart) discard;
-        float h = clamp((v_oz - ozRange.x) / max(ozRange.y - ozRange.x, 1e-3), 0.0, 1.0);
-        float fres = pow(1.0 - abs(dot(n, V)), 2.0);
-        float lvl = ghost * 1.04;
-        float filled = 1.0 - smoothstep(lvl - 0.02, lvl + 0.02, h);
-        float line = exp(-pow((h - lvl) / 0.035, 2.0)) * step(ghost, 0.985);
-        vec3 shell = vec3(0.55, 0.62, 0.72) * (0.10 + 0.55 * fres);
-        vec3 fillc = vec3(1.0, 0.62, 0.20) * (0.30 + 0.9 * fres) * filled;
-        vec3 c = shell + fillc + vec3(1.0, 0.9, 0.7) * line * 0.9;
-        c *= smoothstep(0.0, 0.15, ghost);        // fade the hologram in instead of popping on
-        f_color = vec4(to_srgb(c), 0.0);
+        // The orb coming back (last ~1 s of the recharge, like RL): a translucent whitish glass sphere that
+        // fades in and warms up. Alpha blended, so it reads against the sky from the side as well as from above.
+        if (!glowPart || v_oz < orbZ) discard;
+        float edge = pow(1.0 - ndv, 2.0);
+        vec3 c = mix(vec3(0.80, 0.85, 0.95), vec3(1.0, 0.80, 0.45), ghost * ghost) * (0.85 + 0.6 * edge);
+        f_color = vec4(to_srgb(c), ghost * (0.25 + 0.6 * edge));
         return;
     }
     vec3 c;
     if (glowPart) {
-        c = vec3(1.0, 0.50, 0.06) * (1.05 + 0.25 * pulse);
-        c += vec3(1.0, 0.75, 0.35) * 0.8 * pow(1.0 - abs(dot(n, V)), 2.0);  // bright rim
+        // shiny gold: darker underneath, a sharp sun glint, the sky reflected on top, a hot rim
+        vec3 R = reflect(-V, n);
+        vec3 body = mix(vec3(0.55, 0.19, 0.02), vec3(1.0, 0.56, 0.08), smoothstep(0.0, 1.0, n.z * 0.5 + 0.5));
+        c = body * (1.0 + 0.12 * pulse);
+        c += vec3(1.0, 0.85, 0.55) * pow(max(dot(R, SUN_DIR), 0.0), 28.0) * 2.4;
+        c += vec3(1.0, 0.92, 0.75) * pow(max(R.z, 0.0), 8.0) * 0.55;
+        c += vec3(1.0, 0.70, 0.30) * pow(1.0 - ndv, 3.0) * 1.1;
         c += vec3(1.0, 0.85, 0.6) * 1.8 * flash;
     } else {
         float ndl = max(dot(n, SUN_DIR), 0.0);
