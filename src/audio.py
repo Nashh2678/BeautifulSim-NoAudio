@@ -76,7 +76,7 @@ class Audio:
 
     # sound name prefix -> mixer category (Settings > Audio sliders); anything else = master only
     CATEGORIES = (("ball_post", "post"), ("ball_", "ball"), ("bump", "impact"), ("body", "impact"), ("demo", "demo"), ("boost", "boost"),
-                  ("pad_pickup", "boost"), ("engine", "engine"), ("supersonic", "engine"),
+                  ("pad_pickup", "boost"), ("pad_respawn", "boost"), ("engine", "engine"), ("supersonic", "engine"),
                   ("flipreset", "reset"), ("jump", "flips"), ("doublejump", "flips"), ("dodge", "flips"),
                   ("land", "flips"))
 
@@ -93,6 +93,7 @@ class Audio:
         self.sounds = {}                  # name -> [pygame.mixer.Sound]
         self._last_pick = {}
         self._boost = {}                  # car key -> dict(ch, fading)
+        self._pad_loops = {}              # pad index -> channel playing its respawn loop
         settings = _load_settings()
         self.muted = bool(settings.get("muted", False))
         self.volume = float(os.environ.get("RSV_VOLUME", settings.get("volume", 0.7)))
@@ -336,6 +337,46 @@ class Audio:
                 self._stream.set_boost(False, 0.0, 0.0, 0.0)
             self.play("boost_stop", st.get("pos"), 0.8, st.get("local", False))
 
+    # ---- boost pad respawn ------------------------------------------------------------------- #
+
+    PAD_LOOP_MAX = 4           # nearest recharging pads that get their loop
+    PAD_LOOP_RANGE = 3000.0    # uu
+
+    def update_pad_respawn(self, pads):
+        """pads: [(index, pos, progress 0..1)] for every recharging pad. RL's Play_Boost_Pickup_Respawn_Start is
+        an endless loop per pad whose volume follows the RTPC Boost_Pickup_Respawn_Timer: -96 dB at 0 to 0 dB at 1,
+        linear in dB, so it is silent for most of the recharge and swells in over the last second or two."""
+        if not self.ok or getattr(self, "_pg", None) is None or "pad_respawn_loop" not in self.sounds:
+            return
+        want = {}
+        if not self.muted and self.active and self.listener is not None:
+            lp = self.listener[0]
+            near = []
+            for i, pos, prog in pads:
+                db = -96.3 * (1.0 - min(max(float(prog), 0.0), 1.0))
+                if db < -40.0:
+                    continue
+                d = math.sqrt((pos[0] - lp[0]) ** 2 + (pos[1] - lp[1]) ** 2 + (pos[2] - lp[2]) ** 2)
+                if d < self.PAD_LOOP_RANGE:
+                    near.append((d, i, pos, 10.0 ** (db / 20.0)))
+            for d, i, pos, g in sorted(near)[:self.PAD_LOOP_MAX]:
+                att = 1.0 / (1.0 + (d / 1200.0) ** 2)                # dies out with distance (no far floor)
+                want[i] = (pos, g * att * self._cat_gain("pad_respawn"))
+        for i in [k for k in self._pad_loops if k not in want]:
+            self._pad_loops.pop(i).fadeout(80)
+        for i, (pos, g) in want.items():
+            ch = self._pad_loops.get(i)
+            l, r = self._gains(pos, g, False)
+            if ch is None:
+                ch = self._pg.mixer.find_channel(False)
+                if ch is None:
+                    continue
+                ch.set_volume(min(1.0, l), min(1.0, r))
+                ch.play(self.sounds["pad_respawn_loop"][0], loops=-1, fade_ms=60)
+                self._pad_loops[i] = ch
+            else:
+                ch.set_volume(min(1.0, l), min(1.0, r))
+
     # ---- engine ------------------------------------------------------------------------------ #
 
     def update_engine(self, car):
@@ -362,6 +403,7 @@ class Audio:
             if st.get("ch") is not None:
                 self._loop_free.append(st["ch"])
         self._boost.clear()
+        self._pad_loops.clear()
 
 
 class _SilentSynth:

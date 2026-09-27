@@ -323,6 +323,12 @@
   ],
   "pad_pickup_small": [
    "pad_pickup_small_0.ogg"
+  ],
+  "pad_respawn_loop": [
+   "pad_respawn_loop_0.wav"
+  ],
+  "pad_respawn_end": [
+   "pad_respawn_end_0.ogg"
   ]
  },
  "engine_rates": [

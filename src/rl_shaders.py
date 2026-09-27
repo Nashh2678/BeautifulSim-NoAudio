@@ -118,7 +118,7 @@ float ballMarkAt(vec3 p, vec3 n) {
     float r = length(d);
     float fw = max(fwidth(r), 1e-3);
     float t = clamp(ballMark.w, 0.0, 1.0);
-    const float RO = 108.0;
+    const float RO = 91.25;                                       // the outer ring = the ball's size
     float wo = max(2.4, 0.8 * fw);
     float outer = 1.0 - smoothstep(wo - fw, wo + fw, abs(r - RO));
     float ri = RO * mix(0.80, 0.33, t);
@@ -129,7 +129,9 @@ float ballMarkAt(vec3 p, vec3 n) {
     float di = length(d - ri * vec2(cos(ang), sin(ang)));
     float wi = max(mix(2.4, 3.6, t), 0.8 * fw);                   // the dots a bit fatter than the line
     float inner = 1.0 - smoothstep(wi - fw, wi + fw, di);
-    float on = step(0.0, ballMark.w) * step(p.z, ballMark.z) * step(0.2, n.z) * step(r, 140.0);
+    // any surface facing up at all (floor, the whole floor-wall curve up to where it turns vertical), not above
+    // the ball's top: a ball resting against the wall projects onto the curve higher than its centre
+    float on = step(0.0, ballMark.w) * step(p.z, ballMark.z + 91.25) * step(0.03, n.z) * step(r, 120.0);
     return max(outer, inner) * on;
 }
 float shadowAt(vec3 p) {
@@ -340,9 +342,10 @@ void main() {
         }
     }
 
-    float bmk = ballMarkAt(p, n) * ((grid || ramp) ? 1.0 : 0.0);
+    float bmk = ballMarkAt(p, n) * (ceil ? 0.0 : 1.0);
     col = mix(col, vec3(0.85), bmk * 0.85);
     emis = mix(emis, vec3(0.40), bmk);
+    alpha = max(alpha, bmk * 0.9);                                // on the glass part of the curve too
 
     // ---- lighting ----
     float ndl = max(dot(n, SUN_DIR), 0.0);
@@ -445,6 +448,7 @@ BALL_FRAG = '''
 ''' + COMMON + '''
 uniform vec3 camPos;
 uniform float inGoal;      // 1 = ball centre inside a goal mouth, overlapping the goal line
+uniform vec4 blurRot;      // spin motion blur: object-space axis (xyz), angle turned over the last frame (w)
 in vec3 v_pos;
 in vec3 v_obj;
 in vec3 v_nrm;
@@ -470,11 +474,10 @@ float ballSeam(vec3 o, float k) {
     return f / max(length(g), 1e-3);
 }
 
-void main() {
-    // Ball: two interlocking panels (pearl white / cool grey) split by one continuous recessed seam
-    // with a muted blue edge on one side and orange on the other, contour grooves following the seam,
-    // fine honeycomb micro-texture. No pentagons, no lights.
-    vec3 o = normalize(v_obj);
+// Ball surface: two interlocking panels (pearl white / cool grey) split by one continuous recessed seam with a
+// muted blue edge on one side and orange on the other, contour grooves following the seam, fine honeycomb
+// micro-texture. No pentagons, no lights. o = unit object-space direction.
+void ballSurf(vec3 o, out vec3 base, out vec3 ballEmis, out float ks, out float channel) {
     // two interlocking seams (the second = the first rotated a quarter turn onto another axis)
     float d1 = ballSeam(o, 0.95);
     float d2 = ballSeam(o.yzx, 0.95);
@@ -482,7 +485,7 @@ void main() {
     float ds = near1 ? d1 : d2;                            // signed distance to the nearest seam
     float ad = abs(ds);
     float fw = max(fwidth(ad), 1e-4);
-    float channel = 1.0 - smoothstep(0.026 - fw, 0.026 + fw, ad);          // black seam band
+    channel = 1.0 - smoothstep(0.026 - fw, 0.026 + fw, ad);          // black seam band
     float edge = smoothstep(0.026 - fw, 0.026 + fw, ad) * (1.0 - smoothstep(0.040 - fw, 0.040 + fw, ad));
     float lip = 1.0 - smoothstep(0.040, 0.10, ad);                          // panel edge rolls into the seam
     // three thin grooves following each seam
@@ -509,10 +512,32 @@ void main() {
     shell *= 1.0 - 0.22 * lip;
     // small coloured stripes: every seam blue on one side, orange on the other
     vec3 accent = ds > 0.0 ? vec3(0.15, 0.50, 1.0) : vec3(1.0, 0.50, 0.10);
-    vec3 base = mix(shell, accent, edge);
+    base = mix(shell, accent, edge);
     base = mix(base, vec3(0.02, 0.021, 0.025), channel);
-    vec3 ballEmis = accent * edge * 0.12;
-    float ks = 0.35 * (1.0 - channel) * (1.0 - 0.4 * lip);
+    ballEmis = accent * edge * 0.12;
+    ks = 0.35 * (1.0 - channel) * (1.0 - 0.4 * lip);
+}
+
+vec3 rotAxis(vec3 v, vec3 k, float a) {
+    float c = cos(a), s_ = sin(a);
+    return v * c + cross(k, v) * s_ + k * dot(k, v) * (1.0 - c);
+}
+
+void main() {
+    // Spin motion blur: the surface averaged over the rotation of the last frame (blurRot = object-space axis,
+    // angle). A fast spin at a modest frame rate otherwise makes the thin high-contrast seams jump from frame
+    // to frame (it read as the rotation running at 30 fps); at high fps the angle is tiny and this is a no-op.
+    vec3 o0 = normalize(v_obj);
+    int ns = blurRot.w > 0.02 ? 6 : 1;
+    vec3 base = vec3(0.0), ballEmis = vec3(0.0); float ks = 0.0, channel = 0.0;
+    for (int k = 0; k < ns; k++) {
+        float a = ns > 1 ? blurRot.w * float(k) / float(ns - 1) : 0.0;
+        vec3 b_, e_; float s_, c_;
+        ballSurf(rotAxis(o0, blurRot.xyz, a), b_, e_, s_, c_);
+        base += b_; ballEmis += e_; ks += s_; channel += c_;
+    }
+    float inv = 1.0 / float(ns);
+    base *= inv; ballEmis *= inv; ks *= inv; channel *= inv;
     float rough = 56.0;
 
     vec3 n = normalize(v_nrm);

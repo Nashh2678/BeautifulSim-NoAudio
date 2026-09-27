@@ -414,6 +414,25 @@ class RSVRenderer:
         self.ctx.fbo.depth_mask = True
         self._pad_ghosts = []
 
+    BALL_SPIN_SHUTTER = 0.7          # fraction of the last frame's rotation the ball's spin blur covers
+
+    def _ball_spin_blur(self, f, u, teleported):
+        """(object-space axis, angle) the ball turned since the previous frame, x shutter, for the spin motion blur
+        in BALL_FRAG. The object frame is the model matrix's columns (forward, left, up)."""
+        f = np.asarray(tuple(f), "f8"); u = np.asarray(tuple(u), "f8")
+        M = np.stack([f, np.cross(u, f), u], 1)
+        prev, self._ball_prev_rot = getattr(self, "_ball_prev_rot", None), M
+        if prev is None or teleported:
+            return (0.0, 0.0, 1.0, 0.0)
+        R = M @ prev.T
+        ang = math.acos(max(-1.0, min(1.0, (R[0, 0] + R[1, 1] + R[2, 2] - 1.0) * 0.5)))
+        if ang < 1e-4 or ang > 1.2:                  # still, or a jump (reset) rather than a spin
+            return (0.0, 0.0, 1.0, 0.0)
+        ax = np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]])
+        ax /= max(np.linalg.norm(ax), 1e-9)
+        ao = M.T @ ax
+        return (float(ao[0]), float(ao[1]), float(ao[2]), float(ang * self.BALL_SPIN_SHUTTER))
+
     BALL_MARK_TOP = 1000.0           # ball height (above the surface under it) where the inner marker ring is 4 dots
 
     def _ball_mark(self, state, ball_pos):
@@ -2139,6 +2158,11 @@ class RSVRenderer:
                     self.fx.pad_pickup((float(locs[i][0]), float(locs[i][1]), 0.0), bool(cache[i][0]))
                 elif act and not self._pad_prev[i]:            # just respawned
                     self._pad_spawn_t[i] = now_p
+                    lst = self.audio.listener
+                    rp = (float(locs[i][0]), float(locs[i][1]), 40.0)
+                    if (self._pad_pick_t[i] is not None and lst is not None      # RL: Play_Boost_Pickup_Respawn_End,
+                            and math.dist(rp, lst[0]) < 3000.0):                # only for pads near the camera
+                        self.audio.play("pad_respawn_end", rp, 0.9 / (1.0 + (math.dist(rp, lst[0]) / 1200.0) ** 2))
                 self._pad_prev[i] = act
             pp = self.prog_pad
             pp["m_vp"].write(vp_bytes)
@@ -2150,7 +2174,7 @@ class RSVRenderer:
             # Recharge (RL): the empty pad's base stays black for the first half, then whitens from the edge in
             # (PAD_FRAG `charge`), and in the last ~1 s the orb fades back in as a whitish glass sphere before it
             # pops back gold.
-            ghosts, charge, glows = [], [], []
+            ghosts, charge, glows, recharging = [], [], [], []
             for i in range(n_p):
                 is_big, mat = cache[i]
                 pp["m_model"].write(mat)
@@ -2178,7 +2202,10 @@ class RSVRenderer:
                             g_ = 1.0 - max(0.0, left) / g_win
                             ghosts.append((mat, is_big, g_))
                     glows.append((x_, y_, is_big, False, prog, g_))
+                    if pt is not None:
+                        recharging.append((i, (x_, y_, 40.0), prog))
             self.fx.pad_glows(glows, now_p)
+            self.audio.update_pad_respawn(recharging)
             self._pad_ghosts = ghosts            # translucent: drawn after the sky (see _render_pad_ghosts)
         if PERF:
             self._perf_pads += time.perf_counter() - _p0
@@ -2187,8 +2214,9 @@ class RSVRenderer:
         ball_phys = state.ball_state
         ball_pos = ball_phys.get_pos(interp_ratio)
         self.ctx.disable(moderngl.CULL_FACE)
-        self.prog_ball["m_model"].write(self._model_matrix(ball_pos, ball_phys.get_forward(interp_ratio),
-                                                           ball_phys.get_up(interp_ratio)).tobytes())
+        b_f, b_u = ball_phys.get_forward(interp_ratio), ball_phys.get_up(interp_ratio)
+        self.prog_ball["m_model"].write(self._model_matrix(ball_pos, b_f, b_u).tobytes())
+        self.prog_ball["blurRot"].value = self._ball_spin_blur(b_f, b_u, ball_phys.is_teleporting())
         bx_, by_, bz_ = float(ball_pos[0]), float(ball_pos[1]), float(ball_pos[2])
         in_goal = abs(bx_) < 893.0 and bz_ < 642.775 and abs(by_) > 5124.25 - 91.25
         if in_goal != getattr(self, "_ball_in_goal", None):

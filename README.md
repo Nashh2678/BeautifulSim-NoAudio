@@ -87,7 +87,7 @@ there are git-ignored, so they never get committed by accident.
 - **Cars and ball**: team-painted cars, a two-seam ball that darkens as it crosses the goal line, shiny boost pads
   that stay black, then whiten from the edge in as they recharge, with the orb coming back as a blurry ghost that
   sharpens into gold just before it respawns, and Rocket League's white ball marker on the ground under the ball
-  (a fixed outer ring and an inner ring of 4 arcs that shrinks to 4 dots as the ball rises).
+  (an outer ring the size of the ball and an inner ring of 4 arcs that shrinks to 4 dots as the ball rises).
 - **Ball trail**: like Rocket League, a round tube in the colour of the last team to touch the ball, shown above
   82 kph, white right behind the ball, soft at the edges and fading out over 1 s.
 - **Effects**: boost flames, supersonic trails, jump and flip flashes, sparks where a car's body (not its wheels)
