@@ -22,6 +22,31 @@ SEGMENTS = 96
 LAKE_C, LAKE_R, LAKE_Z = (9800.0, 9800.0), (3600.0, 2400.0), -30.0
 
 
+# The settlement (maps.build_valley): the road from the plaza along the lake shore to the village, the fields
+# beyond it, the castle on the hill above it. Trees and boulders stay out of these (clear_zone).
+ROAD = [(6200.0, 5800.0), (10800.0, 6200.0), (14400.0, 7900.0), (16000.0, 10600.0), (15700.0, 12600.0)]
+STREET_END = (15300.0, 16400.0)
+VILLAGE = (15550.0, 14200.0)
+FIELDS = (20300.0, 12800.0)
+CASTLE = (11600.0, 20200.0)
+
+
+def _seg_dist(px, py, a, b):
+    ax, ay = a; bx, by = b
+    dx, dy = bx - ax, by - ay
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy + 1e-9)))
+    return math.hypot(px - ax - t * dx, py - ay - t * dy)
+
+
+def clear_zone(x, y):
+    if math.hypot(x - VILLAGE[0], y - VILLAGE[1]) < 3000 or math.hypot(x - FIELDS[0], y - FIELDS[1]) < 3700:
+        return True
+    if math.hypot(x - CASTLE[0], y - CASTLE[1]) < 3300:
+        return True
+    pts = ROAD + [STREET_END]
+    return any(_seg_dist(x, y, a, b) < 650 for a, b in zip(pts[:-1], pts[1:]))
+
+
 def _noise(rng_seed=7, n=256):
     rng = np.random.default_rng(rng_seed)
     return rng.random((n, n))
@@ -208,7 +233,7 @@ def build(seed=3):
     for _ in range(70):
         r = rnd.uniform(PLAZA_R + 400.0, 24000.0); th = rnd.uniform(0, 2 * math.pi)
         x, y = r * math.cos(th), r * math.sin(th)
-        if in_lake(x, y, 1.05):
+        if in_lake(x, y, 1.05) or clear_zone(x, y):
             continue
         z = _height(x, y)
         sz = rnd.uniform(90.0, 320.0)
@@ -221,7 +246,7 @@ def build(seed=3):
         th = rnd.uniform(0, 2 * math.pi)
         x, y = r * math.cos(th), r * math.sin(th)
         z = _height(x, y)
-        if z > 700.0 or in_lake(x, y):
+        if z > 700.0 or in_lake(x, y) or clear_zone(x, y):
             continue
         if rnd.random() < 0.35:                                                   # deciduous
             h = rnd.uniform(700.0, 1150.0) * (1.0 + 0.5 * (r - PLAZA_R) / 12000.0)
@@ -240,7 +265,7 @@ def build(seed=3):
     return np.asarray(tris, "f4")
 
 
-MESH_VERSION = 5
+MESH_VERSION = 6
 
 
 def load_or_build(cache_path):

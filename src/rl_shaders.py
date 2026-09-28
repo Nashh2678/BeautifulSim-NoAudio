@@ -698,26 +698,45 @@ vec3 skyline(vec3 d, vec3 c) {
 float fbm3(vec2 p) { return vnoise(p) * 0.5 + vnoise(p * 2.1 + 3.1) * 0.3 + vnoise(p * 4.3 + 7.7) * 0.2; }
 float hash3(vec3 p) { return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
 
-// Stars, sized in PIXELS: one candidate per cell of a 3D grid on the unit sphere (`prob` of the cells hold one).
-// Every star is at least ~1 px so it stays visible; most are faint, some medium, a few big and bright, in blue /
-// white / yellow / orange shades. Keep the cells >= ~2 px (scale <= ~300 at 1080p) or they merge.
-vec3 stars(vec3 d, float scale, float prob, float seed) {
-    vec3 p = d * scale;
-    vec3 cell = floor(p);
-    float h = hash3(cell + seed);
-    if (h > prob) return vec3(0.0);
-    h /= prob;
-    vec3 j = vec3(hash3(cell + seed + 1.3), hash3(cell + seed + 2.7), hash3(cell + seed + 5.1)) - 0.5;
-    float px = max(length(fwidth(p)), 1e-4);                   // cells per pixel
-    float dpx = length(fract(p) - 0.5 - j * 0.30) / px;         // distance in pixels (centres kept off the cell edges)
-    float h2 = hash3(cell + seed + 9.9), h3 = hash3(cell + seed + 4.4);
-    float size = 0.55 + 1.0 * pow(h2, 6.0);                     // px radius: mostly ~0.6, a few ~1.5
-    float b = 0.10 + 1.3 * pow(h3, 4.0);                        // mostly faint, a few bright
-    b *= 0.85 + 0.15 * sin(time * (1.3 + 2.5 * fract(h * 91.0)) + h * 50.0);          // slight twinkle
+// Stars: the view direction is projected on the face of a cube (2D grid per face, so every star is a clean disc),
+// one candidate per cell (`prob` of the cells hold one), the 3x3 neighbour cells are checked so a star is never cut
+// by a cell edge. Sized in pixels (a crisp core >= ~1 px + a faint halo); mostly dim, a few bright; blue, white,
+// yellow and orange shades. At 1080p a face cell is ~800/scale px.
+vec3 starTint(float h) {
     float tt = fract(h * 13.0);
-    vec3 tint = tt < 0.30 ? vec3(0.70, 0.80, 1.0) : (tt < 0.72 ? vec3(1.0, 0.98, 0.94)
-              : (tt < 0.90 ? vec3(1.0, 0.88, 0.65) : vec3(1.0, 0.66, 0.50)));
-    return tint * b * exp(-dpx * dpx / (size * size));
+    return tt < 0.30 ? vec3(0.72, 0.82, 1.0) : (tt < 0.72 ? vec3(1.0, 0.98, 0.95)
+         : (tt < 0.90 ? vec3(1.0, 0.88, 0.66) : vec3(1.0, 0.68, 0.52)));
+}
+vec3 stars(vec3 d, float scale, float prob, float seed) {
+    vec3 ad = abs(d);
+    vec2 uv; float face;
+    if (ad.x >= ad.y && ad.x >= ad.z) { uv = d.yz / ad.x; face = d.x > 0.0 ? 0.0 : 1.0; }
+    else if (ad.y >= ad.z)            { uv = d.xz / ad.y; face = d.y > 0.0 ? 2.0 : 3.0; }
+    else                              { uv = d.xy / ad.z; face = d.z > 0.0 ? 4.0 : 5.0; }
+    vec2 p = uv * scale;
+    vec2 fw = fwidth(p);
+    float px = max(max(fw.x, fw.y), 1e-4);                     // cells per pixel
+    if (px > 0.6) return vec3(0.0);                             // (a face seam in this pixel quad)
+    vec2 cell = floor(p);
+    float fs = seed + face * 131.0;
+    vec3 acc = vec3(0.0);
+    for (int j = -1; j <= 1; j++) {
+        for (int i = -1; i <= 1; i++) {
+            vec2 c = cell + vec2(float(i), float(j));
+            float h = hash1(c + fs);
+            if (h > prob) continue;
+            h /= prob;
+            vec2 ctr = c + 0.5 + (vec2(hash1(c + fs + 1.7), hash1(c + fs + 4.1)) - 0.5) * 0.7;
+            float dpx = length(p - ctr) / px;
+            float size = 0.75 + 1.0 * pow(hash1(c + fs + 9.2), 5.0);
+            float b = 0.30 + 1.5 * pow(hash1(c + fs + 2.2), 3.0);
+            b *= 0.9 + 0.1 * sin(time * (1.1 + 2.0 * h) + h * 40.0);
+            float core = 1.0 - smoothstep(size * 0.45, size, dpx);
+            float halo = exp(-dpx * dpx / (size * size * 2.5)) * 0.10;
+            acc += starTint(h) * b * (core + halo);
+        }
+    }
+    return acc;
 }
 
 // a sphere in the sky seen from the arena: direction P, angular radius R -> coverage (a) and its normal
@@ -755,9 +774,8 @@ vec3 spaceSky(vec3 d) {
     float nm = fbm3(d.xy * 5.0 + d.z * 3.0) * fbm3(d.yz * 3.0 + 9.0);
     c += (vec3(0.28, 0.06, 0.26) * nm + vec3(0.03, 0.14, 0.20) * (1.0 - nm) * 0.4) * pow(nd, 7.0) * 0.8;
     c = max(c, vec3(0.0));
-    c += stars(d, 120.0, 0.030, 0.0) * 1.6;                                             // a few bright ones
-    c += stars(d, 190.0, 0.050, 17.0) * 1.0;                                            // the bulk
-    c += stars(d, 270.0, 0.035 + 0.10 * min(band, 1.0), 41.0) * 0.7;                    // faint, denser in the band
+    c += stars(d, 50.0, 0.028, 0.0) * 1.2;                                              // clear ones
+    c += stars(d, 95.0, 0.010 + 0.03 * min(band, 1.0), 17.0) * 0.5;                     // dimmer, more in the band
     // the star lighting the scene: a hot disc with a wide glare
     float sd = max(dot(d, SUN_DIR), 0.0);
     c += vec3(1.0, 0.97, 0.9) * (smoothstep(0.99955, 0.9997, sd) * 12.0 + pow(sd, 400.0) * 1.5 + pow(sd, 24.0) * 0.08);
@@ -852,8 +870,8 @@ void main() {
         float sd = max(dot(d, SUN_DIR), 0.0);
         c += vec3(1.0, 0.78, 0.62) * smoothstep(0.99935, 0.9996, sd) * 1.6 * (1.0 - cover * 0.7);
         c += vec3(1.0, 0.55, 0.55) * pow(sd, 300.0) * 0.5;
-    } else if (mapId == 2) {
-        // Parc de Paris: a clear night with the moon
+    } else if (mapId == 2 && starK > 0.0) {
+        // Parc de Paris at night: the moon
         vec3 MOON = normalize(vec3(0.55, 0.45, 0.62));
         vec3 mn;
         vec4 mm = skySphere(d, MOON, 0.032, mn);
@@ -867,7 +885,7 @@ void main() {
     }
     // the first stars in the dark part of the dusk sky
     float sm = starK * smoothstep(0.2, 0.75, d.z) * (1.0 - cover);
-    if (sm > 0.0) c += (stars(d, 150.0, 0.030, 3.0) + stars(d, 240.0, 0.035, 29.0) * 0.6) * sm;
+    if (sm > 0.0) c += stars(d, 80.0, 0.02, 3.0) * sm;
     f_color = vec4(to_srgb(c), 1.0);
 }
 '''
@@ -1069,7 +1087,11 @@ void main() {
         vec3 lowR = vec3(0.30, 0.26, 0.30), midR = vec3(0.40, 0.36, 0.40), hiR = vec3(0.50, 0.47, 0.52);
         alb = hf < 0.35 ? lowR : (hf < 0.62 ? midR : hiR);
         alb *= 0.9 + 0.2 * hash1(floor(v_pos.xy / 900.0));          // facet-to-facet variation
-        float snow = step(0.66, hf) * smoothstep(0.25, 0.55, n.z);
+        // snow: an absolute snow line that wanders across the range (+-1400 uu) with ragged per-pixel edges and
+        // tongues reaching lower on the flatter faces -- not the same white cap on every peak
+        float sline = 4300.0 + 2800.0 * (vnoise(v_pos.xy / 9000.0 + 3.0) - 0.5);
+        float ragged = (vnoise(v_pos.xy / 650.0 + v_pos.z / 480.0) - 0.5) * 1100.0 + (n.z - 0.6) * 1400.0;
+        float snow = smoothstep(sline - 120.0, sline + 120.0, v_pos.z + ragged) * smoothstep(0.22, 0.5, n.z);
         alb = mix(alb, vec3(0.90, 0.91, 0.96), snow);
     } else if (mat < 3.5) {                               // pine foliage
         alb = mix(vec3(0.05, 0.14, 0.07), vec3(0.08, 0.20, 0.09), jit);
@@ -1322,6 +1344,7 @@ SCENE_FRAG = '''
 uniform vec3 camPos;
 uniform float time;
 uniform vec3 haze;          // near, far, strength
+uniform float uNight;       // 1 = evening / night (lit windows, the tower's lights), 0 = daytime
 in vec3 v_pos;
 in vec3 v_col;
 flat in vec2 v_ek;
@@ -1363,6 +1386,11 @@ void main() {
         float ph = kind == 9.0 ? em * 37.0 : hash1(floor(v_pos.xy / 60.0));
         float fl = 0.95 + 0.05 * sin(time * (1.0 + 1.5 * fract(ph * 7.0)) + ph * 40.0);
         vec3 e = alb * (kind == 9.0 ? 2.2 : em) * fl;
+        if (uNight < 0.5 && kind == 2.0 && em < 1.95) {          // daytime: lamps / lanterns are unlit bulbs
+            vec3 cc = alb * 0.35 * (0.6 + 0.4 * max(dot(n, SUN_DIR), 0.0)) + sky_color(reflect(-V, n)) * 0.15;
+            f_color = vec4(to_srgb(mix(cc, hz, hk)), 1.0);
+            return;
+        }
         f_color = vec4(to_srgb(mix(e, hz, hk * 0.35)), 1.0);
         return;
     } else if (kind == 3.0 && abs(n.z) < 0.35) {            // facades: a grid of windows, some lit
@@ -1373,8 +1401,9 @@ void main() {
         win *= 1.0 - smoothstep(0.25, 0.6, fw_);            // far away: the average colour, no shimmer
         float lit = step(0.52, hash1(wi + floor(v_pos.xy / 3000.0) * 7.1));
         vec3 wl = mix(vec3(1.0, 0.72, 0.40), vec3(1.0, 0.86, 0.62), hash1(wi * 1.3));
-        alb = mix(alb, vec3(0.05, 0.06, 0.08), win);
-        emis += wl * win * lit * 1.1 + wl * (1.0 - smoothstep(0.25, 0.6, fw_) > 0.5 ? 0.0 : 0.12) * lit * 0.5;
+        vec3 glass = mix(vec3(0.05, 0.06, 0.08), sky_color(reflect(-V, n)) * 0.55 + vec3(0.03), 1.0 - uNight);
+        alb = mix(alb, glass, win);
+        emis += (wl * win * lit * 1.1 + wl * lit * 0.06 * smoothstep(0.25, 0.6, fw_)) * uNight;
         // a balcony line every other floor
         alb *= 1.0 - 0.25 * step(0.9, fract((fq.y - 60.0) / 660.0)) * step(0.0, fq.y - 60.0);
     } else if (kind == 4.0) {
@@ -1382,6 +1411,24 @@ void main() {
         // light up blue at a constant ~1.5 px (crisp at any distance), warm lamps glow inside the dark iron.
         vec2 uv = v_col.xy;
         vec2 fw = max(fwidth(uv), vec2(1e-5));
+        if (uNight < 0.5) {
+            // daytime: puddled-iron members (panel edges + X bracing, ~5% of a panel, >= 1.2 px) in bronze, the
+            // panels between them a fine open lattice (see-through up close, half-transparent far away)
+            float du_ = min(1.0 - abs(uv.x), min(uv.y, 1.0 - uv.y) * 2.0);
+            float xs_ = abs(abs(uv.x) - abs(2.0 * uv.y - 1.0));
+            float wmem = max(0.05, 1.2 * max(fw.x, fw.y));
+            float member = max(1.0 - smoothstep(wmem, wmem * 1.4, du_), 1.0 - smoothstep(wmem * 0.7, wmem, xs_));
+            vec2 lq2 = fq / 150.0;
+            float fwl2 = max(length(fwidth(lq2)), 1e-4);
+            vec2 dg2 = abs(fract(vec2(lq2.x + lq2.y, lq2.x - lq2.y) * 0.5) - 0.5);
+            float fine = 1.0 - smoothstep(0.07, 0.07 + fwl2, min(dg2.x, dg2.y));
+            if (member < 0.5) {
+                if (fwl2 < 0.35) { if (fine < 0.5) discard; }
+                else if (((int(gl_FragCoord.x) + int(gl_FragCoord.y)) & 1) == 0) discard;
+            }
+            alb = vec3(0.34, 0.25, 0.18) * (0.85 + 0.25 * vnoise(fq / 90.0));
+            spec = 0.1;
+        } else {
         float du = (1.0 - abs(uv.x)) / fw.x;
         float dv = min(uv.y, 1.0 - uv.y) / fw.y;
         float xs = abs(abs(uv.x) - abs(2.0 * uv.y - 1.0));
@@ -1398,6 +1445,7 @@ void main() {
         float spark = step(0.985, hash1(floor(uv * 6.0) + floor(fq / 900.0) * 3.1 + floor(time * 1.2))) * (1.0 - smoothstep(0.2, 0.6, fwl));
         emis += vec3(1.0, 0.72, 0.38) * warm + vec3(0.25, 0.35, 0.6) * 0.10 * bar;
         emis += vec3(0.10, 0.34, 1.0) * 1.25 * max(lineB, lineX * 0.75) + vec3(0.8, 0.9, 1.0) * 1.6 * spark;
+        }
     } else if (kind == 15.0) {
         // spaceship hull: plates with dark seams, some plates carry a thin strip of cool light
         vec2 hq = vec2(fq.x / 620.0, fq.y / 240.0);
@@ -1406,7 +1454,7 @@ void main() {
         float seam = 1.0 - smoothstep(0.0, 0.03 + fwh, min(min(hf.x, 1.0 - hf.x) * 2.6, min(hf.y, 1.0 - hf.y)));
         float h_ = hash1(floor(hq) + 3.7);
         alb *= (0.82 + 0.3 * h_) * (1.0 - 0.45 * seam * (1.0 - smoothstep(0.3, 0.8, fwh)));
-        float strip = step(abs(n.z) > 0.8 ? 0.93 : 0.55, h_)                          // decks: only a few
+        float strip = step(abs(n.z) > 0.8 ? 0.985 : 0.92, h_)                         // a strip on a few plates
                     * (1.0 - smoothstep(0.03, 0.03 + fwh, abs(hf.y - 0.5))) * step(0.12, hf.x) * step(hf.x, 0.88);
         emis += vec3(0.65, 0.88, 1.0) * strip * 1.3 * (1.0 - smoothstep(0.35, 1.0, fwh));
         emis += vec3(0.65, 0.88, 1.0) * 0.06 * step(0.55, h_) * smoothstep(0.35, 1.0, fwh);    // far: a faint average

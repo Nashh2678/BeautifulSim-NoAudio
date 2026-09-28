@@ -2,7 +2,7 @@
 
   valley  the original low-poly evening valley (landscape.py, unchanged)
   temple  "Forbidden Temple"-style: pink dusk, karst peaks, pagodas, a paifang gate, cherry trees, lanterns
-  paris   "Parc de Paris"-style: violet dusk, the Eiffel Tower down the Champ de Mars, Haussmann blocks, the Seine,
+  paris   "Parc de Paris"-style: noon, the Eiffel Tower down the Champ de Mars, Haussmann blocks, the Seine,
           a two-tier stadium stand under floodlights
   space   the arena on an orbital platform: stars, a ringed gas giant, moons, the planet below, asteroids, a station
           (no crowd)
@@ -19,7 +19,7 @@ import numpy as np
 ORDER = ["valley", "temple", "paris", "space"]
 MAP_ID = {k: i for i, k in enumerate(ORDER)}
 TITLE = {"valley": "Evening Valley", "temple": "Forbidden Temple", "paris": "Parc de Paris", "space": "Orbit"}
-SCENE_VERSION = 18
+SCENE_VERSION = 19
 
 
 def _n(v):
@@ -39,11 +39,11 @@ THEMES = {
                    amb=(1.02, 0.88, 1.02), grass=(0.050, 0.150, 0.130), cloudA=(1.0, 0.56, 0.66, 0.44),
                    cloudB=(0.42, 0.18, 0.40, 0.80), haze=(9000.0, 60000.0, 0.72), glass=1.0, stars=0.25,
                    cloud_shape=(1.6, 1.6)),
-    "paris": dict(sun_dir=_n((-0.55, -0.62, 0.16)), sun_col=(0.92, 0.80, 0.96), zen=(0.025, 0.025, 0.10),
-                  mid=(0.18, 0.13, 0.36), hor=(0.62, 0.42, 0.68), glow=(0.95, 0.55, 0.75), ground=(0.04, 0.03, 0.06),
-                  amb=(0.95, 0.90, 1.08), grass=(0.075, 0.25, 0.060), cloudA=(0.60, 0.52, 0.80, 0.56),
-                  cloudB=(0.22, 0.17, 0.38, 0.50), haze=(9000.0, 60000.0, 0.65), glass=1.0, stars=1.3,
-                  cloud_shape=(0.8, 3.6)),
+    "paris": dict(sun_dir=_n((0.30, -0.40, 0.86)), sun_col=(1.05, 1.00, 0.94), zen=(0.13, 0.30, 0.72),
+                  mid=(0.36, 0.55, 0.88), hor=(0.72, 0.82, 0.94), glow=(1.0, 0.95, 0.85), ground=(0.30, 0.30, 0.32),
+                  amb=(1.12, 1.12, 1.18), grass=(0.085, 0.27, 0.065), cloudA=(1.0, 1.0, 1.0, 0.54),
+                  cloudB=(0.72, 0.76, 0.86, 0.85), haze=(12000.0, 75000.0, 0.45), glass=1.0, stars=0.0,
+                  cloud_shape=(1.5, 1.5), night=0.0),
     "space": dict(sun_dir=_n((0.35, -0.55, 0.55)), sun_col=(1.05, 1.00, 0.95), zen=(0.004, 0.004, 0.012),
                   mid=(0.010, 0.012, 0.030), hor=(0.030, 0.040, 0.090), glow=(0.50, 0.55, 0.80),
                   ground=(0.02, 0.05, 0.12), amb=(0.70, 0.78, 1.00), grass=(0.055, 0.060, 0.072),
@@ -529,7 +529,7 @@ def panel(g, A, B, C, D, kind=4):
     g.tris(P, col, 0.0, kind)
 
 
-def _eiffel(g, cx, cy, H):
+def _eiffel(g, cx, cy, H, day=False):
     """The Eiffel Tower in its real proportions (concave exponential profile; four legs joined by the big arches,
     merging at the second floor into one shaft; top floor; antenna). Every face is split into lattice panels whose
     borders and X bracing light up blue (SCENE kind 4), with warm lamps inside -- like the lit tower at night."""
@@ -553,6 +553,7 @@ def _eiffel(g, cx, cy, H):
             panel(g, P(za, ia, ia), P(za, ia, wa), P(zb, ib, wb), P(zb, ib, ib))       # inner faces
             panel(g, P(za, ia, ia), P(za, wa, ia), P(zb, wb, ib), P(zb, ib, ib))
     blue = (0.35, 0.62, 1.0)
+    iron = (0.30, 0.22, 0.16) if day else (0.05, 0.05, 0.07)
     # the big arches under the first floor: a lit band + a dark backing
     for side in range(4):
         yaw = side * math.pi / 2
@@ -565,14 +566,14 @@ def _eiffel(g, cx, cy, H):
             pa.append((u * ia, off, zz + z0g)); pb.append((u * ia, off, zz + z0g + 0.006 * H))
         A = _xf(pa, (cx, cy, 0.0), yaw); B = _xf(pb, (cx, cy, 0.0), yaw)
         for k in range(20):
-            g.quads(A[k], A[k + 1], B[k + 1], B[k], blue, 2.2, 7)
+            g.quads(A[k], A[k + 1], B[k + 1], B[k], iron if day else blue, 0.0 if day else 2.2, 0 if day else 7)
     # floors: dark decks with a warm window band and blue lit edges
     for zf_, ext in ((z1f, 0.010), (z2, 0.007)):
         hw = w(zf_) + ext * H
-        box(g, (cx, cy, zf_ + z0g), (hw, hw, 0.009 * H), 0.0, (0.05, 0.05, 0.07))
-        box(g, (cx, cy, zf_ + z0g), (hw + 8, hw + 8, 0.0035 * H), 0.0, (1.0, 0.72, 0.40), emis=1.3, kind=2, top=(0.05, 0.05, 0.07))
+        box(g, (cx, cy, zf_ + z0g), (hw, hw, 0.009 * H), 0.0, iron)
+        box(g, (cx, cy, zf_ + z0g), (hw + 8, hw + 8, 0.0035 * H), 0.0, (1.0, 0.72, 0.40), emis=1.3, kind=2, top=iron)
         for dz in (0.009 * H, -0.009 * H):             # lit rims only on the sides (a lit top face was a huge square)
-            box(g, (cx, cy, zf_ + z0g + dz), (hw + 14, hw + 14, 0.0012 * H), 0.0, blue, emis=2.2, kind=7, top=(0.05, 0.05, 0.07))
+            box(g, (cx, cy, zf_ + z0g + dz), (hw + 14, hw + 14, 0.0012 * H), 0.0, iron if day else blue, emis=0.0 if day else 2.2, kind=0 if day else 7, top=iron)
     # the shaft: panels roughly as tall as they are wide
     z = z2
     zt = 0.852 * H
@@ -585,9 +586,9 @@ def _eiffel(g, cx, cy, H):
             panel(g, c4a[k], c4a[(k + 1) % 4], c4b[(k + 1) % 4], c4b[k])
         z = zn
     hw = w(zt) + 0.005 * H
-    box(g, (cx, cy, zt + z0g), (hw, hw, 0.010 * H), 0.0, (0.05, 0.05, 0.07))
-    box(g, (cx, cy, zt + z0g + 0.012 * H), (hw * 0.7, hw * 0.7, 0.012 * H), 0.0, blue, emis=2.0, kind=7, top=(0.05, 0.05, 0.07))
-    frustum(g, (cx, cy, zt + z0g + 0.024 * H), hw * 0.4, 0.002 * H, 0, 0.12 * H, 6, (0.10, 0.12, 0.18))
+    box(g, (cx, cy, zt + z0g), (hw, hw, 0.010 * H), 0.0, iron)
+    box(g, (cx, cy, zt + z0g + 0.012 * H), (hw * 0.7, hw * 0.7, 0.012 * H), 0.0, iron if day else blue, emis=0.0 if day else 2.0, kind=0 if day else 7, top=iron)
+    frustum(g, (cx, cy, zt + z0g + 0.024 * H), hw * 0.4, 0.002 * H, 0, 0.12 * H, 6, iron)
     box(g, (cx, cy, H + z0g), (0.003 * H, 0.003 * H, 0.004 * H), 0.0, (1.0, 0.3, 0.2), emis=3.0, kind=2)
 
 
@@ -745,7 +746,7 @@ def _parterre(g, x0, y0, x1, y1, rr=260.0):
     n = len(pts)
     for k in range(n):
         a, b = pts[k], pts[(k + 1) % n]
-        g.tris(np.array([[(c[0], c[1], -45), (a[0], a[1], -45), (b[0], b[1], -45)]]), (0.12, 0.31, 0.10))
+        g.tris(np.array([[(c[0], c[1], -42), (a[0], a[1], -42), (b[0], b[1], -42)]]), (0.13, 0.34, 0.10))
         # curb: outward normal offset
         da = np.array(a) - c; db = np.array(b) - c
         a2 = np.array(a) + da / np.linalg.norm(da) * 40; b2 = np.array(b) + db / np.linalg.norm(db) * 40
@@ -805,8 +806,9 @@ def build_paris(seed=21):
     rng = np.random.default_rng(seed)
     g, eggs = G(), []
     pink = (0.60, 0.43, 0.42)
-    terrain(g, [7200, 9000, 13000, 20000, 30000, 42000, 60000], 64, lambda x, y: -60.0,
-            lambda x, y, z, nz, q: ((0.11 + 0.02 * q, 0.11 + 0.02 * q, 0.125 + 0.02 * q), 0), rng)
+    # ground layers >= 6 uu apart: coplanar ones z-fought (the flicker around the pitch)
+    terrain(g, [7250, 9000, 13000, 20000, 30000, 42000, 60000], 64, lambda x, y: -66.0,
+            lambda x, y, z, nz, q: ((0.30 + 0.03 * q, 0.29 + 0.03 * q, 0.28 + 0.03 * q), 0), rng)
     for i in range(48):                                                                    # paving round the arena
         a0, a1 = 2 * math.pi * i / 48, 2 * math.pi * (i + 1) / 48
         g.tris(np.array([[(0, 0, -60), (7250 * math.cos(a0), 7250 * math.sin(a0), -60), (7250 * math.cos(a1), 7250 * math.sin(a1), -60)]]),
@@ -816,7 +818,7 @@ def build_paris(seed=21):
     _curved_stand(g, eggs, -1, rng, (1.0, 0.50, 0.12), (0.48, 0.18, 0.05))
     # ---- the garden behind the blue goal: pink paths, lawn beds, the golden-sphere fountain, topiaries,
     #      statues, lamps ----
-    g.quads((-7500, -6300, -59), (7500, -6300, -59), (7500, -15500, -59), (-7500, -15500, -59), pink)
+    g.quads((-7500, -7250, -54), (7500, -7250, -54), (7500, -15500, -54), (-7500, -15500, -54), pink)
     for sx in (-1, 1):
         xa, xb = sorted((sx * 1900.0, sx * 6200.0))
         _parterre(g, xa, -12800, xb, -10200)
@@ -833,16 +835,16 @@ def build_paris(seed=21):
     for x in np.arange(-7200, 7300, 1200):
         _plane_tree(g, x + rng.uniform(-100, 100), -15000 + rng.uniform(-150, 150), rng.uniform(1300, 1700), rng)
     # ---- the Champ de Mars behind the orange goal, leading to the tower ----
-    g.quads((-3200, 6600, -58), (3200, 6600, -58), (3200, 24000, -58), (-3200, 24000, -58), (0.11, 0.29, 0.09))
+    g.quads((-3200, 7300, -48), (3200, 7300, -48), (3200, 24000, -48), (-3200, 24000, -48), (0.13, 0.33, 0.10))
     for sx in (-1, 1):
-        g.quads((sx * 3200, 6600, -59), (sx * 4600, 6600, -59), (sx * 4600, 24000, -59), (sx * 3200, 24000, -59), (0.55, 0.47, 0.40))
+        g.quads((sx * 3200, 7300, -54), (sx * 4600, 7300, -54), (sx * 4600, 24000, -54), (sx * 3200, 24000, -54), (0.62, 0.55, 0.46))
         for y in np.arange(7200, 23800, 950):
             _plane_tree(g, sx * (5000 + rng.uniform(-60, 60)), y, rng.uniform(1200, 1500), rng)
             _plane_tree(g, sx * (6100 + rng.uniform(-60, 60)), y + 475, rng.uniform(1200, 1500), rng)
         for y in np.arange(7000, 24000, 2000):
             box(g, (sx * 3400, y, 280), (14, 14, 340), 0.0, (0.12, 0.12, 0.14))
             ico(g, (sx * 3400, y, 650), 50, (1.0, 0.88, 0.62), rng, sub=0, jit=0.0, emis=1.8, kind=2)
-    _eiffel(g, 0.0, 28500.0, 26000.0)
+    _eiffel(g, 0.0, 28500.0, 26000.0, day=True)
     # ---- the city: varied Haussmann blocks around, a few landmarks ----
     placed, tries = [], 0
     while len(placed) < 170 and tries < 6000:
@@ -916,86 +918,91 @@ def _cyl_y(g, cx, cz, y0, y1, r0, r1, n, col, emis=0.0, kind=0, cap=None):
 
 
 def build_space(seed=31):
-    """The arena on the top deck of a star cruiser in orbit: a long pointed hull with rows of lit windows, a
-    command tower at the stern, big glowing engines, side sponsons, neon trims and runway lights; an asteroid belt
-    and a station farther out."""
+    """The arena on the flight deck of a star cruiser in orbit. From the pitch it reads as a ship: armoured hull
+    flanks rise along both sides of the deck (ribs, running lights), the prow narrows to a point ahead past the
+    orange goal, the bridge is a raked wedge at the stern with two big engine nacelles on pylons behind it."""
     rng = np.random.default_rng(seed)
     g = G()
-    deck, hullc, dark, cyan = (0.10, 0.11, 0.13), (0.50, 0.52, 0.57), (0.10, 0.11, 0.13), (0.30, 0.90, 1.00)
-    # hull: sections along y (stern at -y, bow at +y); half width of the deck at each station
-    ys = np.array([-23000, -20000, -15000, -9000, -3000, 3000, 9000, 15000, 21000, 27000, 32000, 36000], "f8")
-    hws = np.array([9800, 10400, 10800, 11000, 11000, 10800, 10000, 8600, 6600, 4200, 1800, 200], "f8")
+    deck, hullc, dark, cyan = (0.10, 0.11, 0.13), (0.46, 0.48, 0.53), (0.09, 0.10, 0.12), (0.30, 0.90, 1.00)
+    ys = np.array([-21000, -17000, -12000, -6000, 0, 6000, 12000, 18000, 24000, 30000, 36000, 41000], "f8")
+    hws = np.array([9000, 9800, 10300, 10500, 10500, 10300, 9600, 8200, 6300, 4000, 1700, 120], "f8")
+    FL_IN, FL_H, FL_OUT = 700.0, 2600.0, 250.0            # flank: inset of its foot, height, overhang of its top
 
-    def section(y, hw):
-        k = hw / 11000.0
-        # deck edge, chine, lower hull, keel (x, z) -- symmetric
-        return [(hw, -60.0), (hw * 1.06 + 300 * k, -900.0), (hw * 0.62, -3300.0 * (0.4 + 0.6 * k)), (0.0, -4000.0 * (0.4 + 0.6 * k))]
-    S = [section(y, hw) for y, hw in zip(ys, hws)]
+    def hw_at(y):
+        return float(np.interp(y, ys, hws))
+
+    # deck + lower hull (seen from far / below)
     for i in range(len(ys) - 1):
         ya, yb = ys[i], ys[i + 1]
-        A, B = S[i], S[i + 1]
-        g.quads((-A[0][0], ya, -60), (A[0][0], ya, -60), (B[0][0], yb, -60), (-B[0][0], yb, -60), deck, 0.0, 15)
+        wa, wb = hws[i], hws[i + 1]
+        g.quads((-wa, ya, -60), (wa, ya, -60), (wb, yb, -60), (-wb, yb, -60), deck, 0.0, 15)
         for sx in (-1, 1):
-            for j, (col, kind) in enumerate(((hullc, 15), (dark, 15), (dark, 5))):
-                a0, a1, b0, b1 = A[j], A[j + 1], B[j], B[j + 1]
-                g.quads((sx * a0[0], ya, a0[1]), (sx * b0[0], yb, b0[1]), (sx * b1[0], yb, b1[1]), (sx * a1[0], ya, a1[1]), col, 0.0, kind)
-            # neon trim along the deck edge, runway lights
-            g.quads((sx * (A[0][0] + 4), ya, -140), (sx * (B[0][0] + 4), yb, -140), (sx * (B[0][0] + 4), yb, -80),
-                    (sx * (A[0][0] + 4), ya, -80), cyan, 2.0, 7)
-            for f in np.linspace(0, 1, 4, endpoint=False):
-                yy = ya + (yb - ya) * f
-                xx = A[0][0] + (B[0][0] - A[0][0]) * f - 250
-                box(g, (sx * xx, yy, -40), (40, 40, 20), 0.0, (0.9, 1.0, 1.0), emis=2.0, kind=2)
-    # stern plate
-    A = S[0]
+            g.quads((sx * wa, ya, -60), (sx * wb, yb, -60), (sx * wb * 0.6, yb, -3200), (sx * wa * 0.6, ya, -3200), dark, 0.0, 15)
+            g.quads((sx * wa * 0.6, ya, -3200), (sx * wb * 0.6, yb, -3200), (0, yb, -3900), (0, ya, -3900), dark, 0.0, 5)
+            # the armoured flank: a raked wall from inside the deck edge up and out, a top rail, the outer face
+            fa0, fb0 = (sx * (wa - FL_IN), ya, -60), (sx * (wb - FL_IN), yb, -60)
+            fa1, fb1 = (sx * (wa + FL_OUT), ya, FL_H * min(1.0, wa / 6000.0)), (sx * (wb + FL_OUT), yb, FL_H * min(1.0, wb / 6000.0))
+            g.quads(fa0, fb0, fb1, fa1, hullc, 0.0, 15)
+            g.quads(fa1, fb1, (fb1[0] + sx * 260, yb, fb1[2] - 200), (fa1[0] + sx * 260, ya, fa1[2] - 200), dark, 0.0, 5)
+            g.quads((fa1[0] + sx * 260, ya, fa1[2] - 200), (fb1[0] + sx * 260, yb, fb1[2] - 200),
+                    (sx * wb, yb, -60), (sx * wa, ya, -60), hullc, 0.0, 15)
+            # running lights along the flank top + a neon line at its foot
+            g.quads((fa1[0] - sx * 6, ya, fa1[2] - 90), (fb1[0] - sx * 6, yb, fb1[2] - 90), (fb1[0] - sx * 6, yb, fb1[2] - 40),
+                    (fa1[0] - sx * 6, ya, fa1[2] - 40), cyan, 2.0, 7)
+            g.quads((fa0[0] - sx * 4, ya, -58), (fb0[0] - sx * 4, yb, -58), (fb0[0] - sx * 34, yb, -58), (fa0[0] - sx * 34, ya, -58), cyan, 1.6, 7)
+    # ribs on the inside of the flanks, every 3000 uu, with a light at the top
+    for y in np.arange(-15000, 30001, 3000):
+        w = hw_at(y)
+        for sx in (-1, 1):
+            top = FL_H * min(1.0, w / 6000.0)
+            p0 = (sx * (w - FL_IN - 30), y, -60); p1 = (sx * (w + FL_OUT - 30), y, top)
+            g.quads((p0[0], y - 120, p0[2]), (p0[0], y + 120, p0[2]), (p1[0], y + 120, p1[2]), (p1[0], y - 120, p1[2]), (0.30, 0.32, 0.36), 0.0, 5)
+            box(g, (p1[0] - sx * 40, y, top - 60), (30, 60, 30), 0.0, (1.0, 0.25, 0.15) if sx < 0 else (0.3, 1.0, 0.4), emis=2.4, kind=2)
+    # deck markings: guide lines and chevrons toward the prow, hazard bands at the stern
     for sx in (-1, 1):
-        for j in range(3):
-            g.quads((sx * A[j][0], ys[0], A[j][1]), (sx * A[j + 1][0], ys[0], A[j + 1][1]), (0, ys[0], A[j + 1][1]), (0, ys[0], A[j][1]), dark, 0.0, 5)
-    # engines: three big nozzles + two small, glowing cores
-    for ex, ez, r in ((0.0, -1900.0, 1900.0), (-5200.0, -1500.0, 1500.0), (5200.0, -1500.0, 1500.0), (-8200.0, -700.0, 700.0), (8200.0, -700.0, 700.0)):
-        _cyl_y(g, ex, ez, ys[0], ys[0] - 2600, r * 0.95, r * 1.15, 20, (0.22, 0.23, 0.26), kind=5)
-        _cyl_y(g, ex, ez, ys[0] - 2600, ys[0] - 2500, r * 1.15, r * 0.9, 20, (0.3, 0.32, 0.36), kind=5,
-               cap=((0.55, 0.85, 1.0), 3.0, 2))
-        _cyl_y(g, ex, ez, ys[0] - 2500, ys[0] - 2300, r * 0.9, r * 0.6, 20, (0.45, 0.80, 1.0), emis=2.4, kind=7)
-    # command tower at the stern: stacked decks with lit windows, the bridge band, antennas, beacons
-    for (cy, hx, hy, z0, hz) in ((-17000, 5200, 2600, -60, 1400), (-17600, 3800, 2000, 1340, 1300), (-18000, 2600, 1500, 2640, 1000)):
-        box(g, (0, cy, z0 + hz / 2), (hx, hy, hz / 2), 0.0, hullc, kind=15, top=deck)
-    box(g, (0, -16450, 3300), (2400, 10, 170), 0.0, (0.75, 0.95, 1.0), emis=1.4, kind=2)        # the bridge windows
-    for ax, h in ((-1500, 2400), (900, 1800), (1900, 1300)):
-        box(g, (ax, -18200, 3640 + h / 2), (30, 30, h / 2), 0.0, (0.5, 0.52, 0.56))
-        box(g, (ax, -18200, 3640 + h + 30), (45, 45, 45), 0.0, (1.0, 0.15, 0.1), emis=2.6, kind=2)
-    # side sponsons with turrets and lights
+        g.quads((sx * 5200, -14000, -57), (sx * 5320, -14000, -57), (sx * 3500, 34000, -57), (sx * 3380, 34000, -57), (0.85, 0.75, 0.2), 0.6, 0)
+    for y in np.arange(8500, 32000, 2200):
+        for sx in (-1, 1):
+            g.quads((0, y + 700, -57), (sx * 1600, y, -57), (sx * 1600, y + 180, -57), (0, y + 880, -57), cyan, 1.4, 7)
+    # the bridge: a raked wedge at the stern with a wide window band
+    by0, by1, bw = -19500.0, -13500.0, 4200.0
     for sx in (-1, 1):
-        box(g, (sx * 12200, -2000, -1300), (1400, 7000, 700), 0.0, hullc, kind=15, top=deck)
-        for yy in (-7000, -2000, 3000):
-            lathe(g, (sx * 12200, yy, -600), [(900, 0), (850, 250), (500, 520), (0, 600)], 12, lambda nz, zf, q: (0.42, 0.44, 0.48), kind=5)
-            _cyl_y(g, sx * 12200, -350, yy + 200, yy + 2600, 90, 70, 8, (0.3, 0.32, 0.36))
-        box(g, (sx * 13620, -2000, -1300), (8, 6800, 30), 0.0, cyan, emis=2.0, kind=7)
-    # superstructure along both deck edges (seen from the pitch): blocks of decks with lit windows, neon caps,
-    # masts with beacons
+        g.quads((sx * bw, by1, -60), (sx * bw, by0, -60), (sx * bw * 0.8, by0, 3800), (sx * bw * 0.75, by1 - 2500, 3400), hullc, 0.0, 15)
+    g.quads((-bw, by1, -60), (bw, by1, -60), (bw * 0.75, by1 - 2500, 3400), (-bw * 0.75, by1 - 2500, 3400), hullc, 0.0, 15)
+    g.quads((-bw * 0.75, by1 - 2500, 3400), (bw * 0.75, by1 - 2500, 3400), (bw * 0.8, by0, 3800), (-bw * 0.8, by0, 3800), dark, 0.0, 5)
+    for k in range(2):                                                      # window bands on the raked front
+        f0, f1 = 0.62 + k * 0.2, 0.70 + k * 0.2
+        za, zb = 3400 * f0, 3400 * f1
+        ya_, yb_ = by1 - 2500 * f0 + 12, by1 - 2500 * f1 + 12
+        g.quads((-bw * (1 - 0.25 * f0) * 0.85, ya_, za), (bw * (1 - 0.25 * f0) * 0.85, ya_, za),
+                (bw * (1 - 0.25 * f1) * 0.85, yb_, zb), (-bw * (1 - 0.25 * f1) * 0.85, yb_, zb), (0.75, 0.93, 1.0), 1.5, 2)
+    for ax, h in ((-1800, 2000), (1400, 1500)):
+        box(g, (ax, by0 + 800, 3800 + h / 2), (30, 30, h / 2), 0.0, (0.5, 0.52, 0.56))
+        box(g, (ax, by0 + 800, 3800 + h + 30), (45, 45, 45), 0.0, (1.0, 0.15, 0.1), emis=2.6, kind=2)
+    # two engine nacelles on pylons behind the bridge (seen past the blue goal) + the main engine block
     for sx in (-1, 1):
-        y = -13000.0
-        while y < 12500.0:
-            ln = rng.uniform(1800, 3600); h = rng.uniform(700, 2000); wd = rng.uniform(900, 1600)
-            hw_here = float(np.interp(y + ln / 2, ys, hws))
-            xc = sx * (hw_here - wd * 0.5 - 250)
-            if abs(xc) > 5600:
-                box(g, (xc, y + ln / 2, -60 + h / 2), (wd / 2, ln / 2, h / 2), 0.0, hullc, kind=15, top=deck)
-                box(g, (xc, y + ln / 2, -60 + h + 12), (wd / 2 + 8, ln / 2 + 8, 12), 0.0, cyan, emis=1.6, kind=7)
-                if rng.random() < 0.4:
-                    box(g, (xc, y + ln / 2, -60 + h + 700), (25, 25, 700), 0.0, (0.5, 0.52, 0.56))
-                    box(g, (xc, y + ln / 2, -60 + h + 1420), (40, 40, 40), 0.0, (1.0, 0.2, 0.1), emis=2.6, kind=2)
-            y += ln + rng.uniform(300, 900)
-    # tall tail fins at the stern, lit edges
+        ex, ez = sx * 7200.0, 2600.0
+        _cyl_y(g, ex, ez, -12000, -24000, 1500, 1500, 20, hullc, kind=15)
+        _cyl_y(g, ex, ez, -12000, -11000, 1500, 400, 20, hullc, kind=5, cap=((0.3, 0.32, 0.36), 0.0, 5))
+        _cyl_y(g, ex, ez, -24000, -24400, 1500, 1250, 20, (0.2, 0.21, 0.24), kind=5, cap=((0.55, 0.85, 1.0), 3.0, 2))
+        _cyl_y(g, ex, ez, -24380, -24420, 1600, 1600, 20, (0.45, 0.8, 1.0), emis=2.4, kind=7)
+        g.quads((sx * 5000, -20000, -60), (sx * 5000, -15000, -60), (ex - sx * 900, -15000, ez), (ex - sx * 900, -20000, ez), dark, 0.0, 5)   # pylon
+    for ex, ez, r in ((0.0, -1700.0, 1800.0), (-4600.0, -1500.0, 1300.0), (4600.0, -1500.0, 1300.0)):
+        _cyl_y(g, ex, ez, ys[0], ys[0] - 2200, r * 0.95, r * 1.15, 20, (0.22, 0.23, 0.26), kind=5)
+        _cyl_y(g, ex, ez, ys[0] - 2200, ys[0] - 2100, r * 1.15, r * 0.9, 20, (0.3, 0.32, 0.36), kind=5, cap=((0.55, 0.85, 1.0), 3.0, 2))
+    A = [(hws[0], -60), (hws[0] * 0.6, -3200), (0, -3900)]
     for sx in (-1, 1):
-        base = [(sx * 3800, -20500, -60), (sx * 3800, -14500, -60), (sx * 4600, -19500, 5200), (sx * 4600, -22500, 5600)]
-        g.quads(base[0], base[1], base[2], base[3], hullc, 0.0, 5)
-        g.quads((base[0][0] + sx * 200, base[0][1], base[0][2]), (base[1][0] + sx * 200, base[1][1], base[1][2]),
-                (base[2][0] + sx * 200, base[2][1], base[2][2]), (base[3][0] + sx * 200, base[3][1], base[3][2]), hullc, 0.0, 5)
-        g.quads(base[1], (base[1][0] + sx * 200, base[1][1], base[1][2]), (base[2][0] + sx * 200, base[2][1], base[2][2]), base[2], cyan, 1.8, 7)
-        box(g, (base[3][0] + sx * 100, base[3][1], base[3][2] + 60), (60, 60, 60), 0.0, (1.0, 0.2, 0.1), emis=2.6, kind=2)
-    # bow sensor spike
-    _cyl_y(g, 0.0, -400.0, ys[-1] - 500, ys[-1] + 4000, 320, 20, 8, (0.5, 0.52, 0.56), kind=5)
+        g.quads((sx * A[0][0], ys[0], A[0][1]), (sx * A[1][0], ys[0], A[1][1]), (0, ys[0], A[1][1]), (0, ys[0], A[0][1]), dark, 0.0, 5)
+    # tail fins on the nacelles
+    for sx in (-1, 1):
+        base = [(sx * 7200, -23000, 4100), (sx * 7200, -18000, 4100), (sx * 7600, -21500, 8200), (sx * 7600, -24200, 8400)]
+        g.quads(*base, hullc, 0.0, 15)
+        g.quads((base[1][0] - sx * 20, base[1][1] + 10, base[1][2]), (base[1][0] + sx * 20, base[1][1] + 10, base[1][2]),
+                (base[2][0] + sx * 20, base[2][1] + 10, base[2][2]), (base[2][0] - sx * 20, base[2][1] + 10, base[2][2]), cyan, 1.8, 7)
+        box(g, (base[3][0], base[3][1], base[3][2] + 60), (60, 60, 60), 0.0, (1.0, 0.2, 0.1), emis=2.6, kind=2)
+    # the prow: a sensor spike + a light at its tip
+    _cyl_y(g, 0.0, 400.0, ys[-1] - 800, ys[-1] + 4500, 340, 20, 8, (0.5, 0.52, 0.56), kind=5)
+    box(g, (0.0, ys[-1] + 4500, 400), (60, 60, 60), 0.0, (1.0, 1.0, 1.0), emis=3.0, kind=2)
     # neon gates behind the goals, in the team colours
     for sy, col in ((-1, (0.25, 0.55, 1.0)), (1, (1.0, 0.50, 0.15))):
         for i in range(24):
@@ -1007,25 +1014,24 @@ def build_space(seed=31):
             q = [(x, y + sy * 200, z) for x, y, z in p]
             g.quads(p[0], p[1], q[1], q[0], (0.2, 0.22, 0.26), 0.0, 5)
             g.quads(*q, col, 2.2, 7)
-    # an asteroid belt: a tilted ring the ship flies past (not rocks scattered at random)
+    # an asteroid belt the ship flies past, and a station farther out
     tilt = math.radians(14.0)
     for _ in range(110):
         th = rng.uniform(0, 2 * math.pi)
-        r = rng.uniform(42000, 62000)
+        r = rng.uniform(46000, 66000)
         x, y = r * math.cos(th), r * math.sin(th)
         z = math.sin(th) * r * math.tan(tilt) - 6000 + rng.normal(0, 1500)
         big = rng.random() > 0.72
         sz = rng.uniform(1500, 3800) if big else rng.uniform(300, 1000)
         col = (0.34, 0.31, 0.29) if rng.random() < 0.6 else (0.42, 0.35, 0.28)
         _asteroid(g, (x, y, z), sz, col, rng, 3 if big else 2)
-    # the station, farther out
-    sc = np.array([-33000.0, 40000.0, 16000.0])
+    sc = np.array([-36000.0, 42000.0, 16000.0])
     frustum(g, (sc[0], sc[1], sc[2] - 3500), 1400, 1400, 0, 7000, 12, (0.72, 0.74, 0.78), kind=5)
     frustum(g, (sc[0], sc[1], sc[2] + 3500), 1400, 400, 0, 900, 12, (0.72, 0.74, 0.78), kind=5)
     frustum(g, (sc[0], sc[1], sc[2] - 3500), 400, 1400, -900, 0, 12, (0.72, 0.74, 0.78), kind=5, cap=False)
     for k in range(36):
         a = 2 * math.pi * k / 36
-        box(g, (sc[0] + 7000 * math.cos(a), sc[1] + 7000 * math.sin(a), sc[2]), (420, 640, 420), a, (0.80, 0.82, 0.86), kind=3)
+        box(g, (sc[0] + 7000 * math.cos(a), sc[1] + 7000 * math.sin(a), sc[2]), (420, 640, 420), a, (0.80, 0.82, 0.86), kind=15)
     for k in range(4):
         a = math.pi / 4 + k * math.pi / 2
         box(g, (sc[0] + 4200 * math.cos(a), sc[1] + 4200 * math.sin(a), sc[2]), (2800, 90, 90), a, (0.6, 0.62, 0.66), kind=5)
@@ -1033,9 +1039,6 @@ def build_space(seed=31):
         for sx in (-1, 1):
             box(g, (sc[0] + sx * 6000, sc[1], sc[2] + sz_ * 4200), (4200, 1200, 20), 0.0, (0.10, 0.18, 0.42), kind=5)
             box(g, (sc[0] + sx * 1900, sc[1], sc[2] + sz_ * 4200), (500, 60, 60), 0.0, (0.6, 0.62, 0.66))
-    for k in range(6):
-        a = 2 * math.pi * k / 6
-        box(g, (sc[0] + 7000 * math.cos(a), sc[1] + 7000 * math.sin(a), sc[2] + 480), (40, 40, 40), a, (1.0, 0.15, 0.1), emis=2.5, kind=2)
     return g.array(), np.zeros((0, 8), "f4")                  # no crowd aboard
 
 
@@ -1073,100 +1076,140 @@ def _balloon(g, x, y, z, s, rng):
     box(g, (x, y, z - s * 0.06), (s * 0.03, s * 0.03, s * 0.03), 0.0, (1.0, 0.6, 0.2), emis=ph, kind=9)      # burner
 
 
+def _road(g, pts, width, L, col=(0.42, 0.36, 0.30), step_=300.0, lift=22.0):
+    """A dirt road through the polyline pts, draped on the terrain (landscape._height)."""
+    P = []
+    for (a, b) in zip(pts[:-1], pts[1:]):
+        n = max(1, int(math.hypot(b[0] - a[0], b[1] - a[1]) // step_))
+        for k in range(n):
+            t = k / n
+            P.append((a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t))
+    P.append(pts[-1])
+    for (a, b) in zip(P[:-1], P[1:]):
+        d = np.array([b[0] - a[0], b[1] - a[1]]); d /= np.linalg.norm(d) + 1e-9
+        nrm = np.array([-d[1], d[0]]) * width / 2
+        za, zb = L._height(*a) + lift, L._height(*b) + lift
+        g.quads((a[0] - nrm[0], a[1] - nrm[1], za), (a[0] + nrm[0], a[1] + nrm[1], za),
+                (b[0] + nrm[0], b[1] + nrm[1], zb), (b[0] - nrm[0], b[1] - nrm[1], zb), col)
+    return P
+
+
 def build_valley(seed=41):
-    """Extra landmarks for the evening valley (drawn on top of landscape.py's hills, trees and mountains): a lakeside
-    village with lit windows and a pier, a castle on a hill, a windmill, a lamp-lit path, hot-air balloons."""
+    """The evening valley's settlement, laid out as one place: a road leaves the plaza, follows the lake shore and
+    becomes the main street of a village (houses facing the street, a church on the square, a path down to a pier);
+    farm fields with a windmill and a farmhouse beyond the village; the castle on the hill above it; a few hot-air
+    balloons flying together over the lake. landscape.py keeps its trees out of all of these (clear_zone)."""
     import landscape as L
     rng = np.random.default_rng(seed)
     g = G()
+    walls = [(0.88, 0.84, 0.74), (0.84, 0.78, 0.66), (0.90, 0.88, 0.82)]
+    roofs = [(0.44, 0.17, 0.12), (0.38, 0.15, 0.11), (0.48, 0.22, 0.14)]
+    road = _road(g, L.ROAD, 420.0, L)
+    for k in range(1, len(road) - 1, 4):                                   # lamps along the road
+        a, b = road[k - 1], road[k + 1]
+        d = np.array([b[0] - a[0], b[1] - a[1]]); d /= np.linalg.norm(d) + 1e-9
+        x, y = road[k][0] - d[1] * 300, road[k][1] + d[0] * 300
+        z = L._height(x, y)
+        box(g, (x, y, z + 230), (12, 12, 280), 0.0, (0.15, 0.13, 0.12))
+        ico(g, (x, y, z + 520), 36, (1.0, 0.80, 0.50), rng, sub=0, jit=0.0, emis=1.8, kind=2)
+    # the main street: the road's last leg carried on through the village; houses on both sides face it
+    s0, s1 = np.array(L.ROAD[-2]), np.array(L.STREET_END)
+    sd = (s1 - s0) / np.linalg.norm(s1 - s0)
+    sn = np.array([-sd[1], sd[0]])
+    _road(g, [tuple(s0), tuple(s1)], 420.0, L)
+    yaw_st = math.atan2(sd[1], sd[0])
+    length = np.linalg.norm(s1 - s0)
+    for side in (-1, 1):
+        t = 500.0
+        while t < length - 300:
+            c = s0 + sd * t + sn * side * (720 + rng.uniform(-40, 40))
+            if np.linalg.norm(c - np.array(L.VILLAGE)) < 900:            # leave the square open
+                t += 700
+                continue
+            hy = rng.uniform(260, 330)
+            _gable_house(g, c[0], c[1], L._height(*c) - 30, rng.uniform(320, 420), hy, rng.uniform(420, 560),
+                         yaw_st, rng, wall=walls[rng.integers(0, 3)], roofc=roofs[rng.integers(0, 3)])
+            t += rng.uniform(850, 1000)
+    # the church on the square, its spire the village landmark
+    vc = np.array(L.VILLAGE)
+    cc = vc + sn * 1300
+    cz = L._height(*cc) - 30
+    _gable_house(g, cc[0], cc[1], cz, 720, 380, 900, yaw_st + math.pi / 2, rng, wall=(0.90, 0.88, 0.82), roofc=(0.28, 0.30, 0.34))
+    t = _xf([(-780, 0, 0)], (cc[0], cc[1], cz), yaw_st + math.pi / 2)[0]
+    box(g, (t[0], t[1], cz + 800), (230, 230, 800), yaw_st + math.pi / 2, (0.90, 0.88, 0.82), kind=3)
+    frustum(g, (t[0], t[1], cz + 1600), 330, 10, 0, 1300, 4, (0.28, 0.30, 0.34), rot=yaw_st + math.pi / 2 + math.pi / 4, kind=12)
+    frustum(g, (vc[0], vc[1], L._height(*vc) - 20), 160, 160, 0, 120, 10, (0.55, 0.53, 0.50))   # the well
+    # a path from the square down to the pier on the lake
     LC, LR = L.LAKE_C, L.LAKE_R
-
-    def in_lake(x, y, pad):
-        return ((x - LC[0]) / LR[0]) ** 2 + ((y - LC[1]) / LR[1]) ** 2 < pad * pad
-    # the village on the lake's far shore
-    placed = []
-    tries = 0
-    while len(placed) < 16 and tries < 800:
-        tries += 1
-        a = rng.uniform(-0.2, 2.2); r = rng.uniform(1.25, 1.9)
-        x = LC[0] + LR[0] * r * math.cos(a); y = LC[1] + LR[1] * r * math.sin(a)
-        if in_lake(x, y, 1.2) or math.hypot(x, y) < L.PLAZA_R + 900 or any(math.hypot(x - px, y - py) < 900 for px, py in placed):
-            continue
-        placed.append((x, y))
-        yaw = math.atan2(y - LC[1], x - LC[0]) + rng.uniform(-0.3, 0.3)
-        _gable_house(g, x, y, L._height(x, y) - 20, rng.uniform(260, 420), rng.uniform(200, 300), rng.uniform(380, 620), yaw, rng)
-    # a church with a spire
-    cx_, cy_ = LC[0] + LR[0] * 1.55 * math.cos(0.9), LC[1] + LR[1] * 1.55 * math.sin(0.9)
-    cz = L._height(cx_, cy_) - 20
-    _gable_house(g, cx_, cy_, cz, 700, 380, 900, 0.9, rng, wall=(0.88, 0.86, 0.80), roofc=(0.25, 0.27, 0.32))
-    t = _xf([(-760, 0, 0)], (cx_, cy_, cz), 0.9)[0]
-    box(g, (t[0], t[1], cz + 800), (230, 230, 800), 0.9, (0.88, 0.86, 0.80), kind=3)
-    frustum(g, (t[0], t[1], cz + 1600), 330, 10, 0, 1300, 4, (0.25, 0.27, 0.32), rot=0.9 + math.pi / 4, kind=12)
-    # the pier with lanterns
-    a = 0.55
-    px0, py0 = LC[0] + LR[0] * 1.02 * math.cos(a), LC[1] + LR[1] * 1.02 * math.sin(a)
-    d = np.array([-math.cos(a), -math.sin(a)])
+    ang = math.atan2(vc[1] - LC[1], vc[0] - LC[0])
+    shore = np.array([LC[0] + LR[0] * 1.02 * math.cos(ang), LC[1] + LR[1] * 1.02 * math.sin(ang)])
+    _road(g, [tuple(vc), tuple(shore + (vc - shore) / np.linalg.norm(vc - shore) * 250)], 300.0, L)
+    d = (np.array(LC) - shore); d /= np.linalg.norm(d)
     for k in range(10):
-        c = np.array([px0, py0]) + d * (k * 180)
+        c = shore + d * (k * 180)
         box(g, (c[0], c[1], L.LAKE_Z + 50), (95, 130, 12), math.atan2(d[1], d[0]), (0.42, 0.30, 0.20))
         if k % 3 == 0:
             box(g, (c[0] + d[1] * 110, c[1] - d[0] * 110, L.LAKE_Z + 140), (10, 10, 90), 0.0, (0.2, 0.15, 0.1))
             ico(g, (c[0] + d[1] * 110, c[1] - d[0] * 110, L.LAKE_Z + 250), 32, (1.0, 0.75, 0.40), rng, sub=0, jit=0.0, emis=2.0, kind=2)
-    # a castle on a hill on the other side of the valley
-    kx, ky = -15500.0, -11500.0
+    # farm fields beyond the village, the windmill and a farmhouse at their edge
+    fc = np.array(L.FIELDS)
+    crops = [(0.62, 0.52, 0.20), (0.26, 0.40, 0.12), (0.36, 0.26, 0.16), (0.55, 0.50, 0.22), (0.30, 0.44, 0.14), (0.40, 0.30, 0.18)]
+    k = 0
+    for i in (-1, 0, 1):
+        for j in (-0.5, 0.5):
+            c = fc + sd * (i * 1550) + sn * (j * 1150)
+            hx, hy = 720, 540
+            corners = [c + sd * a * hx + sn * b * hy for a, b in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+            P = [(p[0], p[1], L._height(*p) + 14) for p in corners]
+            g.quads(*P, crops[k % len(crops)])
+            k += 1
+    wm = fc + sd * 2700 + sn * 400
+    wx, wy = float(wm[0]), float(wm[1])
+    wz = L._height(wx, wy) - 20
+    frustum(g, (wx, wy, wz), 520, 330, 0, 1700, 10, (0.86, 0.84, 0.78), kind=3)
+    frustum(g, (wx, wy, wz + 1700), 420, 0, 0, 550, 10, (0.40, 0.22, 0.16), kind=12)
+    face = -sn
+    hub = np.array([wx, wy]) + face * 420
+    e = np.array([face[1], -face[0]])
+    for q in range(4):
+        a = math.pi / 4 + q * math.pi / 2 + 0.2
+        tip = np.array([math.cos(a), math.sin(a)])
+        ww = np.array([-tip[1], tip[0]]) * 150
+        p0 = (hub[0] + e[0] * tip[0] * 150, hub[1] + e[1] * tip[0] * 150, wz + 1650 + tip[1] * 150)
+        p1 = (hub[0] + e[0] * tip[0] * 1500, hub[1] + e[1] * tip[0] * 1500, wz + 1650 + tip[1] * 1500)
+        q0 = (p0[0] + e[0] * ww[0], p0[1] + e[1] * ww[0], p0[2] + ww[1])
+        q1 = (p1[0] + e[0] * ww[0], p1[1] + e[1] * ww[0], p1[2] + ww[1])
+        g.quads(p0, p1, q1, q0, (0.85, 0.82, 0.74))
+    fh = fc - sd * 2600 + sn * 900
+    _gable_house(g, fh[0], fh[1], L._height(*fh) - 30, 520, 320, 480, yaw_st, rng, wall=(0.80, 0.72, 0.58), roofc=(0.44, 0.17, 0.12))
+    # the castle on the hill above the village, a path up to its gate
+    kx, ky = L.CASTLE
     kz = L._height(kx, ky) - 30
-    lathe(g, (kx, ky, kz - 200), [(3600, 0), (2800, 500), (1900, 900), (0, 1000)], 16,
-          lambda nz, zf, q: (0.12 + 0.03 * q, 0.22 + 0.03 * q, 0.08), rng=rng, jitter=0.08)
+    lathe(g, (kx, ky, kz - 200), [(3200, 0), (2500, 500), (1700, 900), (0, 1000)], 16,
+          lambda nz, zf, q: (0.12 + 0.03 * q, 0.22 + 0.03 * q, 0.08), rng=rng, jitter=0.06)
+    _road(g, [tuple(vc + sd * 800), ((vc[0] + kx) / 2 + 500, (vc[1] + ky) / 2), (kx, ky - 1700)], 260.0, L, lift=30.0)
     kz += 780
-    stone = (0.52, 0.50, 0.48)
+    stone = (0.55, 0.53, 0.50)
     for i in range(4):
         a0 = math.pi / 4 + i * math.pi / 2
         a1 = a0 + math.pi / 2
         p0 = (kx + 1400 * math.cos(a0), ky + 1400 * math.sin(a0)); p1 = (kx + 1400 * math.cos(a1), ky + 1400 * math.sin(a1))
         m = ((p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2)
         box(g, (m[0], m[1], kz + 350), (990, 110, 350), a0 + math.pi / 4 + math.pi / 2, stone)
-        for k in range(8):                                                 # crenellations
-            t_ = (k + 0.5) / 8
-            q = (p0[0] + (p1[0] - p0[0]) * t_, p0[1] + (p1[1] - p0[1]) * t_)
-            box(g, (q[0], q[1], kz + 750), (50, 50, 50), a0 + math.pi / 4, stone)
+        for q in range(8):
+            t_ = (q + 0.5) / 8
+            qq = (p0[0] + (p1[0] - p0[0]) * t_, p0[1] + (p1[1] - p0[1]) * t_)
+            box(g, (qq[0], qq[1], kz + 750), (50, 50, 50), a0 + math.pi / 4, stone)
         frustum(g, (p0[0], p0[1], kz), 330, 300, 0, 1200, 12, stone)
-        frustum(g, (p0[0], p0[1], kz + 1200), 380, 0, 0, 700, 12, (0.30, 0.20, 0.35), kind=12)
+        frustum(g, (p0[0], p0[1], kz + 1200), 380, 0, 0, 700, 12, (0.36, 0.22, 0.20), kind=12)
     box(g, (kx, ky, kz + 900), (650, 650, 900), 0.3, stone, kind=3, top=stone)
     frustum(g, (kx + 350, ky + 350, kz + 1800), 260, 240, 0, 900, 12, stone, kind=3)
-    frustum(g, (kx + 350, ky + 350, kz + 2700), 320, 0, 0, 800, 12, (0.30, 0.20, 0.35), kind=12)
+    frustum(g, (kx + 350, ky + 350, kz + 2700), 320, 0, 0, 800, 12, (0.36, 0.22, 0.20), kind=12)
     box(g, (kx + 350, ky + 350, kz + 3700), (6, 6, 300), 0.0, (0.2, 0.2, 0.2))
-    box(g, (kx + 450, ky + 350, kz + 3900), (100, 4, 70), 0.0, (0.85, 0.15, 0.12), emis=0.3)            # flag
-    # a windmill on a hillside
-    wx, wy = 14500.0, -6000.0
-    wz = L._height(wx, wy) - 20
-    frustum(g, (wx, wy, wz), 520, 330, 0, 1700, 10, (0.86, 0.84, 0.78), kind=3)
-    frustum(g, (wx, wy, wz + 1700), 420, 0, 0, 550, 10, (0.40, 0.22, 0.16), kind=12)
-    face = np.array([-math.cos(math.atan2(wy, wx)), -math.sin(math.atan2(wy, wx))])
-    hub = np.array([wx, wy]) + face * 420
-    for k in range(4):
-        a = math.pi / 4 + k * math.pi / 2 + 0.2
-        tip = np.array([math.cos(a), math.sin(a)])
-        for f0 in (0.12,):
-            c = hub
-            e = np.array([face[1], -face[0]])
-            p0 = (c[0] + e[0] * tip[0] * 150, c[1] + e[1] * tip[0] * 150, wz + 1650 + tip[1] * 150)
-            p1 = (c[0] + e[0] * tip[0] * 1500, c[1] + e[1] * tip[0] * 1500, wz + 1650 + tip[1] * 1500)
-            ww = np.array([-tip[1], tip[0]]) * 150
-            q0 = (p0[0] + e[0] * ww[0], p0[1] + e[1] * ww[0], p0[2] + ww[1])
-            q1 = (p1[0] + e[0] * ww[0], p1[1] + e[1] * ww[0], p1[2] + ww[1])
-            g.quads(p0, p1, q1, q0, (0.85, 0.82, 0.74))
-    # a path from the plaza to the village, with lamps
-    for k in range(10):
-        t_ = k / 9
-        x = 6500 + (LC[0] - LR[0] * 1.3 - 6500) * t_ + 400 * math.sin(t_ * 3)
-        y = 6500 + (LC[1] - 6500) * t_ * 0.5
-        z = L._height(x, y)
-        box(g, (x, y, z + 220), (12, 12, 280), 0.0, (0.15, 0.13, 0.12))
-        ico(g, (x, y, z + 520), 38, (1.0, 0.80, 0.50), rng, sub=0, jit=0.0, emis=1.8, kind=2)
-    # hot-air balloons
-    for _ in range(6):
-        r = rng.uniform(9000, 22000); a = rng.uniform(0, 2 * math.pi)
-        _balloon(g, r * math.cos(a), r * math.sin(a), rng.uniform(3500, 8500), rng.uniform(700, 1000), rng)
+    box(g, (kx + 450, ky + 350, kz + 3900), (100, 4, 70), 0.0, (0.85, 0.15, 0.12), emis=0.3)
+    # three hot-air balloons flying together over the lake
+    for (dx, dy, dz) in ((0, 0, 0), (1800, 900, 500), (-1200, 1500, -400)):
+        _balloon(g, LC[0] + 800 + dx, LC[1] + 1200 + dy, 4200 + dz, 850, rng)
     return g.array(), np.zeros((0, 8), "f4")
 
 

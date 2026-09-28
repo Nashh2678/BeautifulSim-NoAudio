@@ -84,9 +84,10 @@ there are git-ignored, so they never get committed by accident.
 
 - **Maps** (arrow keys, remembered): the evening valley below (with a lakeside village, a castle, a windmill and
   hot-air balloons); a Forbidden Temple-style pink dusk with karst
-  peaks, pagodas, a paifang gate, cherry trees and lanterns; a Parc de Paris-style violet evening with two curved blue / orange stands under
+  peaks, pagodas, a paifang gate, cherry trees and lanterns; a Parc de Paris-style noon with two curved blue / orange stands under
   sweeping floodlit roofs, a formal garden with a golden-sphere fountain and graffiti, and the Eiffel Tower lit in blue
-  down the Champ de Mars; and a star cruiser in orbit, the arena on its top deck (stars of many shades, the Milky Way,
+  down the Champ de Mars; and a star cruiser in orbit, the arena on its flight deck between armoured hull
+  flanks (stars of many shades, the Milky Way,
   a ringed gas giant, a moon, the planet below, an asteroid belt, a station; no crowd). Each has its own
   sky, light and field style, and a crowd of eggs that jumps on its seats after goals and saves (a save = a
   defender's touch on a ball that was going in).

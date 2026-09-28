@@ -433,6 +433,7 @@ class RSVRenderer:
         self.prog_rl_arena["mapId"].value = mid
         self.prog_rl_arena["grassCol"].value = tuple(th["grass"])
         self.prog_rl_arena["glassK"].value = float(th.get("glass", 1.0))
+        self.prog_scene["uNight"].value = float(th.get("night", 1.0))
         self.prog_sky["mapId"].value = mid
         self.prog_sky["cloudA"].value = tuple(th["cloudA"])
         self.prog_sky["cloudB"].value = tuple(th["cloudB"])
@@ -2495,7 +2496,7 @@ class RSVRenderer:
         self.fx.cam_right = np.asarray(cam_r, "f4")
         self.fx.cam_up = np.asarray(pyrr.vector3.cross(cam_r, cam_f), "f4")
         self._update_speed_lines(state, interp_ratio, spectated)
-        if self.map_name == "paris":
+        if self.map_name == "paris" and rl_maps.THEMES["paris"].get("night", 1.0) > 0.5:
             top = np.array([0.0, 28500.0, 25200.0], "f4")
             for k in range(2):
                 a = tnow * 0.35 + k * math.pi
