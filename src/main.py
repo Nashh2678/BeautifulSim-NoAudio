@@ -436,6 +436,7 @@ class RSVRenderer:
         self.prog_sky["mapId"].value = mid
         self.prog_sky["cloudA"].value = tuple(th["cloudA"])
         self.prog_sky["cloudB"].value = tuple(th["cloudB"])
+        self.prog_sky["starK"].value = float(th.get("stars", 0.0))
         if name != "valley" and name not in self._scenes:
             mesh, crowd = rl_maps.load_or_build(name, DATA_DIR_PATH)
             vao = self.ctx.vertex_array(self.prog_scene, [(self.ctx.buffer(mesh.tobytes()), "3f 3f 2f",
@@ -443,7 +444,7 @@ class RSVRenderer:
             cvao = None
             if len(crowd):
                 cvao = self.ctx.vertex_array(self.prog_crowd, [
-                    (self.egg_vbo, "3f 3f", "in_position", "in_normal"),
+                    (self.egg_vbo, "2f", "in_corner"),
                     (self.ctx.buffer(crowd.tobytes()), "3f 3f 2f/i", "i_pos", "i_col", "i_ps")])
             self._scenes[name] = (vao, len(mesh), cvao, len(crowd))
         if save:
@@ -477,7 +478,10 @@ class RSVRenderer:
             pc["camPos"].write(cam_bytes)
             pc["time"].value = tnow
             pc["cheer"].value = self._cheer_level()
+            self.ctx.disable(moderngl.CULL_FACE)
+            self.ctx.enable_direct(0x809E)                 # GL_SAMPLE_ALPHA_TO_COVERAGE: smooth egg edges
             cvao.render(moderngl.TRIANGLES, instances=n_eggs)
+            self.ctx.disable_direct(0x809E)
 
     def _render_pad_ghosts(self, vp_bytes, cam_bytes):
         """The returning orbs of recharging pads. Translucent, so drawn AFTER the sky: drawn with the pads, the sky
@@ -781,7 +785,7 @@ class RSVRenderer:
         # Maps (maps.py): scenery + crowd per map, switched live with the arrow keys; the last one is remembered
         self.prog_scene = self.ctx.program(vertex_shader=rl_shaders.SCENE_VERT, fragment_shader=rl_shaders.SCENE_FRAG)
         self.prog_crowd = self.ctx.program(vertex_shader=rl_shaders.CROWD_VERT, fragment_shader=rl_shaders.CROWD_FRAG)
-        self.egg_vbo = self.ctx.buffer(rl_maps.egg_mesh().tobytes())
+        self.egg_vbo = self.ctx.buffer(np.array([(-1, 0), (1, 0), (1, 1), (-1, 0), (1, 1), (-1, 1)], "f4").tobytes())
         self._scenes = {}
         self._cheer_t = -1e9
         saved_map = _read_settings().get("map", "valley")
@@ -2214,7 +2218,8 @@ class RSVRenderer:
 
         self._aspect = width / max(1, height)
         camera_pos, camera_target_pos, camera_fov = self.calc_camera_state(state, interp_ratio, delta_time)
-        proj = Matrix44.perspective_projection(camera_fov, -width/height, 1.0, 50 * 1000.0)
+        # near 10 uu (not 1): 10x the depth precision far out -- distant trims no longer z-fight (flicker)
+        proj = Matrix44.perspective_projection(camera_fov, -width/height, 10.0, 120 * 1000.0)
         lookat = Matrix44(fastvec.look_at(camera_pos, camera_target_pos, (0.0, 0.0, 1.0)))
         vp = (proj * lookat).astype('f4')
         vp_bytes = vp.tobytes()
@@ -2502,6 +2507,12 @@ class RSVRenderer:
         q = rl_events.event_queue
         now = time.time()
         delay = min(max(state.recv_interval, 0.0), 0.12)
+        # Rendering was paused (window unfocused / minimised) while the sender kept going: the events of the pause
+        # must not all fire in this one frame -- up to 0.6 s of hits, bounces and boosts stacked into one loud burst.
+        last, self._drain_t = getattr(self, "_drain_t", now), now
+        if now - last > 0.25:
+            while q and q[0]["t"] < now - 0.1:
+                q.popleft()
         while q and q[0]["t"] + delay <= now:
             ev = q.popleft()
             if now - ev["t"] > 0.6:
@@ -2534,6 +2545,8 @@ class RSVRenderer:
     BALL_TRAIL_SPEED = 82.0 / 0.036                           # 82 kph in uu/s (1 uu = 1 cm)
     BALL_TRAIL_TAIL = 0.60           # after the ball drops under 82 kph it keeps emitting, fainter and fainter
     BALL_TRAIL_LIFE = 1.00
+    BALL_TRAIL_ARM = 0.10            # s over the threshold, uninterrupted, before the trail starts
+    BALL_TRAIL_GRACE = 0.12          # s below it that don't count as an interruption
     BALL_TRAIL_RADIUS = 21.0
     # 70% of the previous saturation ((0.30, 0.45, 1.0) / (1.0, 0.52, 0.12)): 70% of the way from grey, same luminance
     TEAM_TRAIL = ((0.347, 0.452, 0.837), (0.878, 0.542, 0.262))
@@ -2575,7 +2588,17 @@ class RSVRenderer:
         hidden = getattr(state, "ball_hidden", False)
         usable = not hidden and team is not None and state.gamemode != "heatseeker"
         now = time.time()
-        if usable and ball_phys.get_vel(interp_ratio).length > self.BALL_TRAIL_SPEED:
+        # Only after the ball has been over the threshold for BALL_TRAIL_ARM s in a row (a 50/50 spikes the speed for
+        # a packet and the ball goes nowhere). Dips shorter than BALL_TRAIL_GRACE (a bounce, the blend between two
+        # packets) don't reset the timer. The packet velocity, not the interpolated one (which dips mid-bounce).
+        fast = usable and max(ball_phys.prev_vel.length, ball_phys.next_vel.length) > self.BALL_TRAIL_SPEED
+        if fast:
+            if getattr(self, "_trail_arm_t", None) is None:
+                self._trail_arm_t = now
+            self._trail_seen_t = now
+        elif now - getattr(self, "_trail_seen_t", -1e9) > self.BALL_TRAIL_GRACE:
+            self._trail_arm_t = None
+        if fast and now - self._trail_arm_t >= self.BALL_TRAIL_ARM:
             self._trail_fast_t = now
         since = now - getattr(self, "_trail_fast_t", -1e9)
         k = max(0.0, 1.0 - since / self.BALL_TRAIL_TAIL) if usable else 0.0

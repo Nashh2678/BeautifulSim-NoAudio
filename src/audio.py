@@ -265,6 +265,12 @@ class Audio:
         gain *= self._cat_gain(name)
         if gain <= 0.0:
             return None
+        # the same sound twice within 35 ms stacks into one hit twice as loud: keep the first
+        now = time.time()
+        lp = self.__dict__.setdefault("_last_play", {})
+        if now - lp.get(name, -1.0) < 0.035:
+            return None
+        lp[name] = now
         snd = self._pick(name)
         if snd is None:
             return None
@@ -275,8 +281,15 @@ class Audio:
         # Volume/pan BEFORE play: a channel keeps the pan of the last sound it played, and play() releases the
         # GIL, so the mixer could render the first block of a quiet far-away sound at the previous (loud, close)
         # sound's level -- a sharp random "tick" on ball touches / bounces, the most frequent one-shots.
+        # BUT SDL_mixer drops a channel's pan/volume effect whenever the sound on it ends -- including when play()
+        # replaces a sound still playing (a stolen or still-fading channel). Setting the volume first and then
+        # replacing a busy channel's sound played the new one at 100% (random "way too loud" sounds). So: stop a
+        # busy channel first (effects cleared now, not by play), then set the volume, play, and set it again.
+        if ch.get_busy():
+            ch.stop()
         ch.set_volume(min(1.0, l), min(1.0, r))
         ch.play(snd)
+        ch.set_volume(min(1.0, l), min(1.0, r))
         return ch
 
     # ---- boost loops ------------------------------------------------------------------------- #
@@ -373,6 +386,7 @@ class Audio:
                     continue
                 ch.set_volume(min(1.0, l), min(1.0, r))
                 ch.play(self.sounds["pad_respawn_loop"][0], loops=-1, fade_ms=60)
+                ch.set_volume(min(1.0, l), min(1.0, r))
                 self._pad_loops[i] = ch
             else:
                 ch.set_volume(min(1.0, l), min(1.0, r))

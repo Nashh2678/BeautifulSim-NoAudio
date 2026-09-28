@@ -5,6 +5,7 @@
   paris   "Parc de Paris"-style: violet dusk, the Eiffel Tower down the Champ de Mars, Haussmann blocks, the Seine,
           a two-tier stadium stand under floodlights
   space   the arena on an orbital platform: stars, a ringed gas giant, moons, the planet below, asteroids, a station
+          (no crowd)
 
 Arrow keys switch map live (main.py MAP_KEYS). Each non-valley scene is one static mesh (pos, colour, emission,
 kind -> SCENE_FRAG) built here with numpy and cached in data/scene_<map>_cache.npy, plus an instanced egg crowd
@@ -18,7 +19,7 @@ import numpy as np
 ORDER = ["valley", "temple", "paris", "space"]
 MAP_ID = {k: i for i, k in enumerate(ORDER)}
 TITLE = {"valley": "Evening Valley", "temple": "Forbidden Temple", "paris": "Parc de Paris", "space": "Orbit"}
-SCENE_VERSION = 6
+SCENE_VERSION = 12
 
 
 def _n(v):
@@ -32,15 +33,15 @@ THEMES = {
     "valley": dict(sun_dir=_n((-0.45, 0.75, 0.30)), sun_col=(1.00, 0.88, 0.72), zen=(0.035, 0.05, 0.13),
                    mid=(0.22, 0.15, 0.30), hor=(0.95, 0.46, 0.20), glow=(1.0, 0.55, 0.25), ground=(0.04, 0.035, 0.05),
                    amb=(1.0, 1.0, 1.0), grass=(0.080, 0.265, 0.050), cloudA=(0.95, 0.55, 0.35, 0.52),
-                   cloudB=(0.35, 0.25, 0.40, 0.55), haze=(9000.0, 48000.0, 0.85), glass=1.0),
+                   cloudB=(0.35, 0.25, 0.40, 0.55), haze=(9000.0, 48000.0, 0.85), glass=1.0, stars=0.45),
     "temple": dict(sun_dir=_n((0.62, 0.74, 0.14)), sun_col=(1.00, 0.72, 0.80), zen=(0.07, 0.035, 0.16),
                    mid=(0.44, 0.15, 0.38), hor=(1.00, 0.48, 0.55), glow=(1.0, 0.45, 0.58), ground=(0.05, 0.03, 0.05),
                    amb=(1.02, 0.88, 1.02), grass=(0.050, 0.150, 0.130), cloudA=(1.0, 0.56, 0.66, 0.44),
-                   cloudB=(0.42, 0.18, 0.40, 0.72), haze=(9000.0, 60000.0, 0.72), glass=1.0),
+                   cloudB=(0.42, 0.18, 0.40, 0.72), haze=(9000.0, 60000.0, 0.72), glass=1.0, stars=0.35),
     "paris": dict(sun_dir=_n((-0.55, -0.62, 0.16)), sun_col=(0.92, 0.80, 0.96), zen=(0.05, 0.04, 0.15),
                   mid=(0.28, 0.18, 0.42), hor=(0.82, 0.52, 0.72), glow=(0.95, 0.55, 0.75), ground=(0.04, 0.03, 0.06),
                   amb=(0.95, 0.90, 1.08), grass=(0.075, 0.25, 0.060), cloudA=(0.85, 0.60, 0.86, 0.40),
-                  cloudB=(0.26, 0.18, 0.40, 0.78), haze=(9000.0, 55000.0, 0.72), glass=1.0),
+                  cloudB=(0.26, 0.18, 0.40, 0.70), haze=(9000.0, 60000.0, 0.65), glass=1.0, stars=0.75),
     "space": dict(sun_dir=_n((0.35, -0.55, 0.55)), sun_col=(1.05, 1.00, 0.95), zen=(0.004, 0.004, 0.012),
                   mid=(0.010, 0.012, 0.030), hor=(0.030, 0.040, 0.090), glow=(0.50, 0.55, 0.80),
                   ground=(0.02, 0.05, 0.12), amb=(0.70, 0.78, 1.00), grass=(0.055, 0.060, 0.072),
@@ -69,7 +70,7 @@ class G:
         c = np.asarray(col, "f4")
         a[:, :, 3:6] = c if c.ndim == 1 else c.reshape(n, 1, 3)
         e = np.asarray(emis, "f4")
-        a[:, :, 6] = e if e.ndim == 0 else e.reshape(n, 1)
+        a[:, :, 6] = e if e.ndim == 0 else (e.reshape(n, 3) if e.size == 3 * n else e.reshape(n, 1))
         a[:, :, 7] = kind
         self.parts.append(a.reshape(-1, 8))
 
@@ -122,7 +123,7 @@ def frustum(g, c, r0, r1, z0, z1, n, col, emis=0.0, kind=0, cap=True, rot=0.0, s
         g.tris(np.stack([t[:-1], t[1:], ctr], 1), col, emis, kind)
 
 
-def lathe(g, c, prof, n, colfn, kind=0, emis=0.0, rng=None, jitter=0.0, rot=0.0):
+def lathe(g, c, prof, n, colfn, kind=0, emis=0.0, rng=None, jitter=0.0, rot=0.0, vertex_zf=False):
     """Surface of revolution through profile [(r, z)...]; colfn(normal_z, z_frac, rnd) -> colour per face."""
     prof = np.asarray(prof, "f8")
     m = len(prof)
@@ -145,7 +146,8 @@ def lathe(g, c, prof, n, colfn, kind=0, emis=0.0, rng=None, jitter=0.0, rot=0.0)
                     continue
                 nz = abs(nr[2] / ln)
                 zf = (t[:, 2].mean() - c[2]) / ztop
-                g.tris(t[None], colfn(nz, zf, rng.random() if rng is not None else 0.5), emis, kind)
+                e = ((t[:, 2] - c[2]) / ztop)[None, :] if vertex_zf else emis
+                g.tris(t[None], colfn(nz, zf, rng.random() if rng is not None else 0.5), e, kind)
 
 
 _ICO = None
@@ -334,12 +336,12 @@ def _pagoda(g, x, y, z, tiers, w, th, rng, yaw=0.0):
         # glowing paper windows on every side
         for side in range(4):
             a = yaw + side * math.pi / 2
-            off = w * 0.5 + 3
+            off = w * 0.5 + 14
             cx, cy = x + off * math.cos(a), y + off * math.sin(a)
-            box(g, (cx, cy, z + th * 0.5), (2, w * 0.30, th * 0.26), a, (1.0, 0.55, 0.25), emis=1.3, kind=2)
+            box(g, (cx, cy, z + th * 0.5), (6, w * 0.30, th * 0.26), a, (1.0, 0.55, 0.25), emis=1.3, kind=2)
         z += th
         roof(g, (x, y), w * 0.5, w * 0.5, z, th * 0.55, w * 0.30, th * 0.38, yaw, roofc, soffit=soff)
-        box(g, (x, y, z + 6), (w * 0.52, w * 0.52, 6), yaw, gold, emis=0.25)             # gilded beam
+        box(g, (x, y, z - 30), (w * 0.5 + 12, w * 0.5 + 12, 18), yaw, gold, emis=0.25)   # gilded band
         w *= 0.80
         z += th * 0.35
     frustum(g, (x, y, z), w * 0.12, w * 0.02, 0, th * 1.6, 6, gold, emis=0.35)
@@ -375,8 +377,8 @@ def _hall(g, x, y, W, D, H, rng, yaw=0.0):
         box(g, (p[0], p[1], -60 + (4 - k) * 30), (1600, 75, (4 - k) * 30), yaw, stone)
     box(g, (x, y, 180 + H / 2), (W / 2, D / 2, H / 2), yaw, red)
     for side in (1, -1):
-        p = _xf([(0, side * (D / 2 + 3), 0)], (x, y, 0), yaw)[0]
-        box(g, (p[0], p[1], 180 + H * 0.45), (W / 2 - 250, 2, H * 0.3), yaw, paper, emis=1.0, kind=2)
+        p = _xf([(0, side * (D / 2 + 14), 0)], (x, y, 0), yaw)[0]
+        box(g, (p[0], p[1], 180 + H * 0.45), (W / 2 - 250, 6, H * 0.3), yaw, paper, emis=1.0, kind=2)
     ncol = int(W // 700) + 1
     for k in range(ncol):
         px = -W / 2 + k * W / (ncol - 1)
@@ -397,15 +399,14 @@ def _cherry(g, x, y, z, s, rng):
 
 
 def _karst(g, x, y, z, r, h, rng):
-    prof = [(r, -300), (r * 1.06, h * 0.12), (r * 0.98, h * 0.35), (r * 0.88, h * 0.58), (r * 0.74, h * 0.78),
-            (r * 0.52, h * 0.92), (r * 0.18, h)]
-
-    def col(nz, zf, q):
-        green = nz > 0.42 or (zf > 0.8 and q < 0.7) or (q < 0.25)
-        if green:
-            return (0.13 + 0.05 * q, 0.25 + 0.06 * q, 0.15)
-        return (0.38 + 0.08 * q, 0.37 + 0.06 * q, 0.40 + 0.06 * q)
-    lathe(g, (x, y, z), prof, 9, col, rng=rng, jitter=0.14, rot=rng.uniform(0, 1))
+    """A karst limestone peak: a rounded tower (14 sides, 11 rings, jittered). Vegetation is drawn per pixel by
+    SCENE kind 8 from a noise field and the per-vertex height fraction -- per-face green showed the triangles."""
+    prof = [(r, -300), (r * 1.05, h * 0.08), (r * 1.06, h * 0.18), (r * 1.00, h * 0.30), (r * 0.95, h * 0.42),
+            (r * 0.90, h * 0.54), (r * 0.83, h * 0.66), (r * 0.74, h * 0.77), (r * 0.60, h * 0.87), (r * 0.40, h * 0.95),
+            (r * 0.14, h)]
+    tone = rng.uniform(0.9, 1.08)
+    lathe(g, (x, y, z), prof, 14, lambda nz, zf, q: (0.40 * tone, 0.40 * tone, 0.43 * tone), kind=8, rng=rng,
+          jitter=0.08, rot=rng.uniform(0, 1), vertex_zf=True)
 
 
 def build_temple(seed=11):
@@ -516,62 +517,274 @@ def build_temple(seed=11):
 
 
 # ------------------------------------------------------------------------------------------------ paris
-def _eiffel(g, x, y, H=20000.0, B=3800.0):
-    iron = (0.16, 0.11, 0.08)
-    # (height, centre offset of each leg from the tower axis, leg half-width)
-    legs = [(-60, B, 520), (1400, B * 0.80, 470), (2900, B * 0.62, 420)]
+EIFFEL_LIGHT = (0.55, 0.72, 1.00)
+
+
+def _eiffel(g, cx, cy, H, light=EIFFEL_LIGHT):
+    """The Eiffel Tower in its real proportions: four legs on a concave exponential profile joined by the big
+    arches under the first floor, merging at the second floor into one shaft up to the top floor and the antenna.
+    Every face is see-through iron lattice (SCENE kind 4) lit in `light`; lit edges run up the four corners."""
+    def w(z):                                   # half width of the outer profile
+        return H * (0.017 + 0.176 * math.exp(-3.7 * z / H))
+
+    def t(z):                                   # leg thickness (the legs merge near the second floor)
+        return H * 0.075 * (1.0 - 0.35 * z / (0.357 * H))
+    z2 = 0.357 * H
+    zs = np.linspace(0.0, z2, 12)
     for sx, sy in ((1, 1), (-1, 1), (-1, -1), (1, -1)):
-        for (z0, o0, w0), (z1, o1, w1) in zip(legs[:-1], legs[1:]):
-            c0 = np.array([x + sx * o0, y + sy * o0]); c1 = np.array([x + sx * o1, y + sy * o1])
-            P0 = [(c0[0] + dx * w0, c0[1] + dy * w0, z0) for dx, dy in ((1, 1), (-1, 1), (-1, -1), (1, -1))]
-            P1 = [(c1[0] + dx * w1, c1[1] + dy * w1, z1) for dx, dy in ((1, 1), (-1, 1), (-1, -1), (1, -1))]
-            for k in range(4):
-                g.quads(P0[k], P0[(k + 1) % 4], P1[(k + 1) % 4], P1[k], iron, 0.0, 4)
-    # the arches between the legs under the first platform
-    for yaw in (0, math.pi / 2, math.pi, -math.pi / 2):
-        # an arch sagging from the platform edge: 2900 at the legs, ~1730 in the middle
-        pts = [(-B * 0.8 + t * B * 1.6, B * 0.72, 2900 - 1170 * (1 - (2 * t - 1) ** 2)) for t in np.linspace(0, 1, 11)]
-        W = _xf(pts, (x, y, 0), yaw)
-        Wt = _xf([(p[0], p[1], p[2] + 160) for p in pts], (x, y, 0), yaw)
-        for k in range(10):
-            g.quads(W[k], W[k + 1], Wt[k + 1], Wt[k], iron, 0.0, 4)
-    box(g, (x, y, 3000), (B * 0.70, B * 0.70, 110), 0.0, (0.30, 0.22, 0.15), emis=0.0, kind=0,
-        top=(0.30, 0.22, 0.15))
-    box(g, (x, y, 3000), (B * 0.70 + 4, B * 0.70 + 4, 40), 0.0, (1.0, 0.75, 0.35), emis=1.2, kind=2)   # lit gallery
-    # second stage: 4 faces tapering to the second platform, then the shaft
-    stages = [(3000, B * 0.55), (5900, B * 0.33), (9000, B * 0.20), (13000, B * 0.10), (17500, B * 0.05), (H - 900, 120)]
-    for (z0, w0), (z1, w1) in zip(stages[:-1], stages[1:]):
-        P0 = [(x + dx * w0, y + dy * w0, z0) for dx, dy in ((1, 1), (-1, 1), (-1, -1), (1, -1))]
-        P1 = [(x + dx * w1, y + dy * w1, z1) for dx, dy in ((1, 1), (-1, 1), (-1, -1), (1, -1))]
+        for z0, z1 in zip(zs[:-1], zs[1:]):
+            w0, w1 = w(z0), w(z1)
+            i0, i1 = max(w0 - t(z0), 0.0), max(w1 - t(z1), 0.0)
+
+            def P(z, a, b):
+                return (cx + sx * a, cy + sy * b, z - 60.0)
+            g.quads(P(z0, w0, i0), P(z0, w0, w0), P(z1, w1, w1), P(z1, w1, i1), light, 0.0, 4)   # outer x
+            g.quads(P(z0, i0, w0), P(z0, w0, w0), P(z1, w1, w1), P(z1, i1, w1), light, 0.0, 4)   # outer y
+            g.quads(P(z0, i0, i0), P(z0, i0, w0), P(z1, i1, w1), P(z1, i1, i1), light, 0.0, 4)   # inner x
+            g.quads(P(z0, i0, i0), P(z0, w0, i0), P(z1, w1, i1), P(z1, i1, i1), light, 0.0, 4)   # inner y
+    # the arches between the legs under the first floor
+    z1f = 0.178 * H
+    for side in range(4):
+        yaw = side * math.pi / 2
+        ia = w(0.06 * H) - t(0.06 * H)
+        pts, pts2 = [], []
+        for k in range(17):
+            u = -1.0 + 2.0 * k / 16
+            zz = z1f - 0.018 * H - (z1f * 0.62) * (1.0 - u * u)
+            off = w(zz) - t(zz) * 0.3
+            pts.append((u * ia, off, zz - 60.0)); pts2.append((u * ia, off, zz + 0.012 * H - 60.0))
+        A = _xf(pts, (cx, cy, 0.0), yaw); B = _xf(pts2, (cx, cy, 0.0), yaw)
+        for k in range(16):
+            g.quads(A[k], A[k + 1], B[k + 1], B[k], light, 0.0, 4)
+    # floors: a dark deck with a lit gallery band
+    for zf_, dw in ((z1f, 0.006), (z2, 0.004)):
+        hw = w(zf_) + dw * H
+        box(g, (cx, cy, zf_ - 60.0), (hw, hw, 0.008 * H), 0.0, (0.05, 0.05, 0.07))
+        box(g, (cx, cy, zf_ - 60.0 + 0.004 * H), (hw + 6, hw + 6, 0.0025 * H), 0.0, light, emis=1.6, kind=7)
+    # the shaft
+    zs2 = np.linspace(z2, 0.852 * H, 12)
+    for z0, z1 in zip(zs2[:-1], zs2[1:]):
+        w0, w1 = w(z0), w(z1)
+        P0 = [(cx + a * w0, cy + b * w0, z0 - 60.0) for a, b in ((1, 1), (-1, 1), (-1, -1), (1, -1))]
+        P1 = [(cx + a * w1, cy + b * w1, z1 - 60.0) for a, b in ((1, 1), (-1, 1), (-1, -1), (1, -1))]
         for k in range(4):
-            g.quads(P0[k], P0[(k + 1) % 4], P1[(k + 1) % 4], P1[k], iron, 0.0, 4)
-    box(g, (x, y, 5950), (B * 0.36, B * 0.36, 80), 0.0, (0.30, 0.22, 0.15))
-    box(g, (x, y, 5950), (B * 0.36 + 4, B * 0.36 + 4, 30), 0.0, (1.0, 0.75, 0.35), emis=1.2, kind=2)
-    box(g, (x, y, H - 900), (260, 260, 220), 0.0, (0.30, 0.22, 0.15), top=(1.0, 0.8, 0.5))
-    box(g, (x, y, H - 500), (120, 120, 200), 0.0, (1.0, 0.85, 0.55), emis=2.0, kind=2)          # the beacon
-    frustum(g, (x, y, H - 300), 60, 10, 0, 1100, 4, iron)
+            g.quads(P0[k], P0[(k + 1) % 4], P1[(k + 1) % 4], P1[k], light, 0.0, 4)
+    zt = 0.852 * H
+    box(g, (cx, cy, zt - 60.0), (w(zt) + 0.004 * H, w(zt) + 0.004 * H, 0.012 * H), 0.0, (0.05, 0.05, 0.07))
+    box(g, (cx, cy, zt - 60.0 + 0.01 * H), (w(zt) * 0.7, w(zt) * 0.7, 0.02 * H), 0.0, light, emis=1.8, kind=7)
+    frustum(g, (cx, cy, zt - 60.0 + 0.03 * H), w(zt) * 0.35, 0.002 * H, 0, 0.12 * H, 6, (0.08, 0.08, 0.1))
+    box(g, (cx, cy, H - 60.0), (0.003 * H, 0.003 * H, 0.004 * H), 0.0, (1.0, 0.95, 0.9), emis=3.0, kind=2)   # beacon
+    # lit corner edges (the tower's outline lights)
+    ez = np.linspace(0.0, zt, 26)
+    for a, b in ((1, 1), (-1, 1), (-1, -1), (1, -1)):
+        d = np.array([a, b]) / math.sqrt(2)
+        perp = np.array([-d[1], d[0]])
+        for z0, z1 in zip(ez[:-1], ez[1:]):
+            e0 = np.array([cx + a * w(z0), cy + b * w(z0)]) + d * 8; e1 = np.array([cx + a * w(z1), cy + b * w(z1)]) + d * 8
+            hw = 0.0022 * H
+            g.quads((*(e0 - perp * hw), z0 - 60), (*(e0 + perp * hw), z0 - 60), (*(e1 + perp * hw), z1 - 60),
+                    (*(e1 - perp * hw), z1 - 60), (0.70, 0.85, 1.0), 2.0, 7)
 
 
-def _haussmann(g, x, y, hx, hy, H, rng):
-    stone = tuple(np.clip(np.array((0.78, 0.71, 0.58)) * rng.uniform(0.85, 1.08), 0, 1))
-    zinc = (0.24, 0.27, 0.34)
-    box(g, (x, y, -60 + H / 2), (hx, hy, H / 2), 0.0, stone, kind=3, top=zinc)
-    # mansard: a steep truncated roof
-    ins = 260
-    b = [(x + sx * hx, y + sy * hy, H - 60) for sx, sy in ((1, 1), (-1, 1), (-1, -1), (1, -1))]
-    t = [(x + sx * (hx - ins), y + sy * (hy - ins), H + 480) for sx, sy in ((1, 1), (-1, 1), (-1, -1), (1, -1))]
-    for k in range(4):
-        g.quads(b[k], b[(k + 1) % 4], t[(k + 1) % 4], t[k], zinc)
-    g.quads(t[0], t[1], t[2], t[3], (0.20, 0.22, 0.27))
-    for _ in range(rng.integers(2, 5)):                                                     # chimneys
-        cx = x + rng.uniform(-hx + ins, hx - ins); cy = y + rng.uniform(-hy + ins, hy - ins)
-        box(g, (cx, cy, H + 600), (40, 90, 120), 0.0, (0.55, 0.42, 0.34))
-    # dormer windows: small lit boxes on the mansard
-    for sx in (-1, 1):
-        for k in range(int(hy // 500)):
-            yy = y - hy + 350 + k * 500
-            box(g, (x + sx * (hx - ins * 0.45), yy, H + 200), (8, 45, 55), 0.0, (1.0, 0.75, 0.45),
-                emis=0.9 if rng.random() < 0.5 else 0.0, kind=2 if rng.random() < 0.5 else 0)
+def _arc_pt(C, s, r, a):
+    return (C[0] + s * r * math.cos(a), C[1] + r * math.sin(a))
+
+
+def _curved_stand(g, eggs, s, rng, team_col, team_dark, amax=0.235, Lc=30000.0, x0=5350.0):
+    """One long side stand (s=+1 on +x, -1 on -x): two curved tiers facing the pitch, a sweeping roof with
+    floodlights and banners, end walls with graffiti. Eggs on every seat."""
+    C = (-s * Lc, 0.0)
+    R0 = Lc + x0
+    NS = 30
+    A = np.linspace(-amax, amax, NS + 1)
+    tread, white = (0.36, 0.36, 0.38), (0.82, 0.82, 0.84)
+    prof = []                                   # (r_in, r_out, top z) of every step, for the end walls
+
+    def tier(r_start, z_start, rows, depth, rise, z_floor):
+        for k in range(rows):
+            r_in, r_out = r_start + k * depth, r_start + (k + 1) * depth
+            zt, zp = z_start + (k + 1) * rise, z_start + k * rise
+            prof.append((r_in, r_out, zt))
+            for i in range(NS):
+                a0, a1 = A[i], A[i + 1]
+                p = [_arc_pt(C, s, r, a) for r, a in ((r_in, a0), (r_in, a1), (r_out, a1), (r_out, a0))]
+                g.quads((*p[0], zt), (*p[1], zt), (*p[2], zt), (*p[3], zt), tread)
+                g.quads((*p[0], zp), (*p[1], zp), (*p[1], zt), (*p[0], zt), team_dark)          # riser
+            # eggs along the row
+            rr = r_in + depth * 0.42
+            n = int(2 * amax * rr // 72.0)
+            ang = (np.arange(n) - (n - 1) * 0.5) * (72.0 / rr)
+            keep = rng.random(n) > 0.05
+            ang = ang[keep]
+            px = C[0] + s * rr * np.cos(ang); py = C[1] + rr * np.sin(ang)
+            pz = np.full(len(ang), zt)
+            cols = EGG_COLS[rng.integers(0, len(EGG_COLS), len(ang))] * rng.uniform(0.85, 1.1, (len(ang), 1))
+            eggs.append(np.concatenate([np.stack([px, py, pz], 1), np.clip(cols, 0, 1), rng.random((len(ang), 1)),
+                                        (74.0 * rng.uniform(0.9, 1.1, len(ang)))[:, None]], 1))
+        # the solid body under the tier (seen from below / the ends)
+        r_end = r_start + rows * depth
+        for i in range(NS):
+            a0, a1 = A[i], A[i + 1]
+            b0, b1 = _arc_pt(C, s, r_end, a0), _arc_pt(C, s, r_end, a1)
+            g.quads((*b0, z_floor), (*b1, z_floor), (*b1, z_start + rows * rise), (*b0, z_start + rows * rise), white)
+        return r_end, z_start + rows * rise
+
+    # lower tier, a walkway with a team-colour LED fascia, upper tier
+    r1, z1 = tier(R0, 0.0, 16, 120.0, 78.0, -60.0)
+    z_walk = z1 + 120.0
+    rf = r1 + 420.0
+    for i in range(NS):
+        a0, a1 = A[i], A[i + 1]
+        p = [_arc_pt(C, s, r, a) for r, a in ((r1, a0), (r1, a1), (rf, a1), (rf, a0))]
+        g.quads((*p[0], z_walk), (*p[1], z_walk), (*p[2], z_walk), (*p[3], z_walk), (0.30, 0.30, 0.32))
+        f0, f1 = _arc_pt(C, s, rf, a0), _arc_pt(C, s, rf, a1)
+        g.quads((*f0, z_walk), (*f1, z_walk), (*f1, z_walk + 520), (*f0, z_walk + 520), white)
+        g.quads((*_arc_pt(C, s, rf - 4, a0), z_walk + 300), (*_arc_pt(C, s, rf - 4, a1), z_walk + 300),
+                (*_arc_pt(C, s, rf - 4, a1), z_walk + 380), (*_arc_pt(C, s, rf - 4, a0), z_walk + 380), team_col, 1.8, 7)
+    prof.append((r1, rf, z_walk + 520.0))
+    r2, z2 = tier(rf, z_walk + 520.0, 18, 125.0, 100.0, z_walk)
+    # back wall
+    rb = r2 + 150.0
+    for i in range(NS):
+        a0, a1 = A[i], A[i + 1]
+        b0, b1 = _arc_pt(C, s, rb, a0), _arc_pt(C, s, rb, a1)
+        g.quads((*b0, -60), (*b1, -60), (*b1, z2 + 900), (*b0, z2 + 900), white)
+    # sweeping roof: front edge rising toward the middle, team-coloured underside, floodlights + banners
+    zr = z2 + 700.0
+    for i in range(NS):
+        a0, a1 = A[i], A[i + 1]
+        zf0 = zr + 950.0 * math.cos(a0 / amax * math.pi / 2); zf1 = zr + 950.0 * math.cos(a1 / amax * math.pi / 2)
+        f0, f1 = _arc_pt(C, s, R0 + 700.0, a0), _arc_pt(C, s, R0 + 700.0, a1)
+        b0, b1 = _arc_pt(C, s, rb + 200.0, a0), _arc_pt(C, s, rb + 200.0, a1)
+        g.quads((*f0, zf0), (*f1, zf1), (*b1, z2 + 900), (*b0, z2 + 900), team_dark)                 # underside
+        g.quads((*f0, zf0 + 140), (*f1, zf1 + 140), (*b1, z2 + 1040), (*b0, z2 + 1040), white)        # top
+        g.quads((*f0, zf0), (*f1, zf1), (*f1, zf1 + 140), (*f0, zf0 + 140), team_col, 1.6, 7)          # lit edge
+        if i % 2 == 0:                                                                                  # floodlights
+            m = _arc_pt(C, s, R0 + 760.0, (a0 + a1) / 2)
+            box(g, (m[0], m[1], (zf0 + zf1) / 2 + 40), (40, 260, 60), 0.0, (1.0, 0.98, 0.92), emis=2.4, kind=2)
+        else:                                                                                           # banners
+            m = _arc_pt(C, s, R0 + 720.0, (a0 + a1) / 2)
+            bc = team_col if (i // 2) % 2 else (0.95, 0.95, 0.97)
+            box(g, (m[0], m[1], (zf0 + zf1) / 2 - 420), (8, 110, 380), 0.0, bc, emis=0.35)
+    prof.append((r2, rb, z2 + 900.0))
+    # end walls following the stepped profile, with graffiti at street level on the front part
+    for a_end in (-amax, amax):
+        sg = 1.0 if a_end > 0 else -1.0
+        t = np.array([-s * math.sin(a_end), math.cos(a_end)]) * sg          # outward along the arc
+        for r_a, r_b, zt in prof:
+            e0, e1 = _arc_pt(C, s, r_a, a_end), _arc_pt(C, s, r_b, a_end)
+            g.quads((*e0, -60), (*e1, -60), (*e1, zt), (*e0, zt), white)
+            if r_b < R0 + 2000.0:
+                h = min(zt - 30.0, 1100.0)
+                g0, g1 = np.array(e0) + t * 30.0, np.array(e1) + t * 30.0
+                g.quads((*g0, -40), (*g1, -40), (*g1, h), (*g0, h), (1, 1, 1), 0.0, 11)
+        if a_end < 0:                                                       # facing the garden
+            er = np.array([s * math.cos(a_end), math.sin(a_end)])
+            width = (6 * 7 - 1) * 44.0
+            if s > 0:                     # the vis mirrors x: this wall reads right-to-left along er, so flip it
+                base = np.array(_arc_pt(C, s, R0 + 180.0 + width, a_end)) + t * 55.0
+                _text(g, "I<PARIS", base, -er, t, 330.0, 44.0)
+            else:
+                base = np.array(_arc_pt(C, s, R0 + 180.0, a_end)) + t * 55.0
+                _text(g, "I<PARIS", base, er, t, 330.0, 44.0)
+
+
+GLYPHS = {
+    "I": ["11111", "00100", "00100", "00100", "00100", "00100", "11111"],
+    "P": ["11110", "10001", "10001", "11110", "10000", "10000", "10000"],
+    "A": ["01110", "10001", "10001", "11111", "10001", "10001", "10001"],
+    "R": ["11110", "10001", "10001", "11110", "10100", "10010", "10001"],
+    "S": ["01111", "10000", "10000", "01110", "00001", "00001", "11110"],
+    "<": ["00000", "01010", "11111", "11111", "01110", "00100", "00000"],   # a heart
+}
+
+
+def _text(g, txt, base, along, out, z0, px):
+    """Block letters (5x7 pixel font) standing proud of a wall: `along` = reading direction, `out` = wall normal."""
+    x = 0.0
+    for ch in txt:
+        rows = GLYPHS[ch]
+        col = (0.95, 0.12, 0.20) if ch == "<" else (0.98, 0.35, 0.62)
+        for j, row in enumerate(rows):
+            for i, bit in enumerate(row):
+                if bit != "1":
+                    continue
+                c = base + along * (x + (i + 0.5) * px)
+                box(g, (c[0], c[1], z0 + (6 - j + 0.5) * px), (px * 0.5, px * 0.5, px * 0.5),
+                    math.atan2(along[1], along[0]), col, emis=0.5)
+                cb = base + along * (x + (i + 0.5) * px + px * 0.18) - out * 6.0          # dark drop shadow
+                box(g, (cb[0], cb[1], z0 + (6 - j + 0.5) * px - px * 0.18), (px * 0.5, px * 0.5, px * 0.5),
+                    math.atan2(along[1], along[0]), (0.05, 0.05, 0.08))
+        x += 6 * px
+
+
+def _topiary(g, x, y, s, rng):
+    frustum(g, (x, y, -60), s * 0.32, s * 0.02, 0, s, 9, (0.10, 0.27, 0.10), kind=6)
+    for _ in range(9):
+        a = rng.uniform(0, 2 * math.pi); h = rng.uniform(0.1, 0.85)
+        r = s * 0.32 * (1 - h) + 6
+        ico(g, (x + r * math.cos(a), y + r * math.sin(a), -60 + h * s), s * 0.035, (1.0, 0.55, 0.12), rng, sub=0,
+            jit=0.0, emis=0.25)
+
+
+def _parterre(g, x0, y0, x1, y1, rr=260.0):
+    """A lawn bed with rounded corners, raised a little, with a white stone curb."""
+    pts = []
+    for (cx, cy, a0) in ((x1 - rr, y1 - rr, 0.0), (x0 + rr, y1 - rr, math.pi / 2), (x0 + rr, y0 + rr, math.pi),
+                         (x1 - rr, y0 + rr, 1.5 * math.pi)):
+        for k in range(5):
+            a = a0 + (math.pi / 2) * k / 4
+            pts.append((cx + rr * math.cos(a), cy + rr * math.sin(a)))
+    c = ((x0 + x1) / 2, (y0 + y1) / 2)
+    n = len(pts)
+    for k in range(n):
+        a, b = pts[k], pts[(k + 1) % n]
+        g.tris(np.array([[(c[0], c[1], -45), (a[0], a[1], -45), (b[0], b[1], -45)]]), (0.12, 0.31, 0.10))
+        # curb: outward normal offset
+        da = np.array(a) - c; db = np.array(b) - c
+        a2 = np.array(a) + da / np.linalg.norm(da) * 40; b2 = np.array(b) + db / np.linalg.norm(db) * 40
+        g.quads((*a, -45), (*b, -45), (*b2, -45), (*a2, -45), (0.86, 0.85, 0.83))
+        g.quads((*a2, -60), (*b2, -60), (*b2, -45), (*a2, -45), (0.86, 0.85, 0.83))
+
+
+def _fountain(g, x, y, rng):
+    white, silver, gold = (0.86, 0.86, 0.88), (0.70, 0.72, 0.76), (1.0, 0.74, 0.22)
+    lathe(g, (x, y, -60), [(1200, 0), (1200, 90), (1100, 110), (1100, 40)], 28, lambda nz, zf, q: white)
+    g.tris(np.array([[(x, y, 10), (x + 1100 * math.cos(a0), y + 1100 * math.sin(a0), 10),
+                      (x + 1100 * math.cos(a1), y + 1100 * math.sin(a1), 10)]
+                     for a0, a1 in zip(np.linspace(0, 2 * math.pi, 29)[:-1], np.linspace(0, 2 * math.pi, 29)[1:])]),
+           (0.20, 0.35, 0.45), 0.0, 1)
+    lathe(g, (x, y, -60), [(420, 0), (420, 200), (260, 320), (200, 700), (330, 780), (330, 820), (120, 900)], 16,
+          lambda nz, zf, q: silver, kind=5)
+    ico(g, (x, y, 1250), 360, gold, rng, sub=2, jit=0.0, emis=0.35, kind=5)
+    for k in range(20):                                     # the silver swirl around the golden ball
+        a0, a1 = 2 * math.pi * k / 20, 2 * math.pi * (k + 1) / 20
+        r = 520
+        z0 = 1250 + 180 * math.sin(a0 * 2); z1 = 1250 + 180 * math.sin(a1 * 2)
+        p0 = (x + r * math.cos(a0), y + r * math.sin(a0)); p1 = (x + r * math.cos(a1), y + r * math.sin(a1))
+        g.quads((*p0, z0 - 45), (*p1, z1 - 45), (*p1, z1 + 45), (*p0, z0 + 45), silver, 0.0, 5)
+
+
+def _building(g, x, y, hx, hy, H, rng, yaw=0.0):
+    """A Parisian block: limestone facade (lit windows), zinc mansard or a flat roof with rooftop boxes,
+    chimneys. Colour, height, footprint and roof vary per building."""
+    stone = [(0.80, 0.74, 0.62), (0.74, 0.66, 0.52), (0.70, 0.70, 0.69), (0.82, 0.70, 0.60), (0.77, 0.73, 0.66)]
+    col = tuple(np.clip(np.array(stone[rng.integers(0, len(stone))]) * rng.uniform(0.9, 1.06), 0, 1))
+    zinc = (0.24 + rng.uniform(-0.03, 0.03), 0.27, 0.34)
+    box(g, (x, y, -60 + H / 2), (hx, hy, H / 2), yaw, col, kind=3, top=zinc)
+    box(g, (x, y, -60 + 330), (hx + 12, hy + 12, 18), yaw, tuple(np.array(col) * 0.85))              # cornice
+    if rng.random() < 0.7:
+        ins = rng.uniform(200, 320)
+        b = _xf([(sx * hx, sy * hy, H - 60) for sx, sy in ((1, 1), (-1, 1), (-1, -1), (1, -1))], (x, y, 0), yaw)
+        t = _xf([(sx * (hx - ins), sy * (hy - ins), H - 60 + rng.uniform(380, 560)) for sx, sy in ((1, 1), (-1, 1), (-1, -1), (1, -1))], (x, y, 0), yaw)
+        for k in range(4):
+            g.quads(b[k], b[(k + 1) % 4], t[(k + 1) % 4], t[k], zinc)
+        g.quads(t[0], t[1], t[2], t[3], (0.20, 0.22, 0.27))
+    else:
+        for _ in range(rng.integers(1, 3)):
+            box(g, (x + rng.uniform(-hx, hx) * 0.5, y + rng.uniform(-hy, hy) * 0.5, H - 60 + 120), (rng.uniform(120, 300), rng.uniform(120, 300), 120), yaw, (0.5, 0.5, 0.52))
+    for _ in range(rng.integers(1, 4)):
+        box(g, (x + rng.uniform(-0.6, 0.6) * hx, y + rng.uniform(-0.6, 0.6) * hy, H + 520), (35, 80, 110), yaw, (0.55, 0.42, 0.34))
 
 
 def _plane_tree(g, x, y, s, rng):
@@ -585,94 +798,106 @@ def _plane_tree(g, x, y, s, rng):
 def build_paris(seed=21):
     rng = np.random.default_rng(seed)
     g, eggs = G(), []
-    # ground: pale paving around the arena, then asphalt streets
-    terrain(g, [7600, 8000, 12000, 20000, 30000, 42000, 60000], 64, lambda x, y: -60.0,
-            lambda x, y, z, nz, q: (((0.36 + 0.03 * q,) * 3) if math.hypot(x, y) < 7700 else (0.10 + 0.02 * q, 0.10 + 0.02 * q, 0.115 + 0.02 * q), 0), rng)
-    for i in range(48):                                                                    # centre paving disc
+    pink = (0.60, 0.43, 0.42)
+    terrain(g, [7200, 9000, 13000, 20000, 30000, 42000, 60000], 64, lambda x, y: -60.0,
+            lambda x, y, z, nz, q: ((0.11 + 0.02 * q, 0.11 + 0.02 * q, 0.125 + 0.02 * q), 0), rng)
+    for i in range(48):                                                                    # paving round the arena
         a0, a1 = 2 * math.pi * i / 48, 2 * math.pi * (i + 1) / 48
-        g.tris(np.array([[(0, 0, -60), (7650 * math.cos(a0), 7650 * math.sin(a0), -60), (7650 * math.cos(a1), 7650 * math.sin(a1), -60)]]),
-               (0.35, 0.34, 0.33))
-    # ---- the main two-tier stand (+x), orange seats, white structure, a floodlit roof ----
-    white, orange, grey = (0.78, 0.76, 0.72), (0.80, 0.33, 0.08), (0.45, 0.44, 0.44)
-    stand(g, eggs, (5300.0, 0.0, 0.0), (0, 1, 0), (1, 0, 0), 18, 14000, 120.0, 80.0, 72.0, rng,
-          tread=grey, riser=orange, rail=white)
-    z_up = 18 * 80 + 520
-    x_up = 5300 + 18 * 120 + 420
-    box(g, (x_up - 200, 0, z_up / 2), (200, 7000, z_up / 2), 0.0, white)                     # fascia wall
-    for k in range(7):                                                                    # LED banner boards
-        cols = [(0.2, 0.5, 1.0), (1.0, 0.45, 0.1), (1.0, 1.0, 1.0), (0.9, 0.2, 0.5)]
-        box(g, (x_up - 405, -6000 + k * 2000, z_up - 200), (4, 900, 150), 0.0, cols[k % 4], emis=1.2, kind=2)
-    stand(g, eggs, (x_up, 0.0, z_up), (0, 1, 0), (1, 0, 0), 20, 14000, 120.0, 95.0, 72.0, rng,
-          tread=grey, riser=orange, rail=white, z_base=z_up - 60)
-    x_back = x_up + 20 * 120
-    z_back = z_up + 20 * 95
-    box(g, (x_back + 150, 0, z_back / 2 + 400), (150, 7200, z_back / 2 + 460), 0.0, white)
-    for sy in (-1, 1):                                                                    # end walls
-        box(g, (5300 + (x_back - 5300) / 2, sy * 7150, z_back / 2), ((x_back - 5300) / 2 + 150, 150, z_back / 2 + 60), 0.0, white)
-    # cantilevered roof, orange underside, floodlight banks on its front edge
-    rf = [(x_back + 300, -7400, z_back + 900), (x_back + 300, 7400, z_back + 900), (5600, 7400, z_back + 1500), (5600, -7400, z_back + 1500)]
-    g.quads(*rf, (0.85, 0.40, 0.12))
-    g.quads(*[(p[0], p[1], p[2] + 120) for p in rf], white)
-    for k in range(10):
-        box(g, (5700, -6300 + k * 1400, z_back + 1380), (60, 420, 70), 0.0, (1.0, 0.97, 0.9), emis=2.2, kind=2)
-    # goal-end stands (+-y)
-    for sy in (-1, 1):
-        stand(g, eggs, (0.0, sy * 6350.0, 0.0), (1, 0, 0), (0, sy, 0), 12, 7600, 120.0, 80.0, 72.0, rng,
-              tread=grey, riser=orange, rail=white)
-        box(g, (0, sy * (6350 + 12 * 120 + 150), 12 * 80 / 2 + 200), (3900, 150, 12 * 80 / 2 + 260), 0.0, white)
-    # ---- the Champ de Mars (-x) leading to the Eiffel Tower, lined with plane trees ----
-    g.quads((-7400, -3600, -55), (-19000, -3600, -55), (-19000, 3600, -55), (-7400, 3600, -55), (0.10, 0.24, 0.08))
-    for x in np.arange(-7800, -18500, -900):
-        for side in (-1, 1):
-            _plane_tree(g, x + rng.uniform(-80, 80), side * 3900, rng.uniform(1100, 1400), rng)
-    for y in np.arange(-5400, 5500, 1350):
-        _plane_tree(g, -6500 + rng.uniform(-100, 100), y, rng.uniform(1100, 1400), rng)
-    _eiffel(g, -22500, 0)
-    # ---- the Seine behind the tower, with quays and bridges ----
-    xs0, xs1 = -28500, -25500
-    g.quads((xs0, -60000, -260), (xs1, -60000, -260), (xs1, 60000, -260), (xs0, 60000, -260), (0.12, 0.16, 0.22), 0.0, 1)
-    for xq in (xs0, xs1):
-        box(g, (xq, 0, -160), (80, 60000, 100), 0.0, (0.55, 0.50, 0.42))
-    for yb in (0.0, -9000.0, 11000.0):
-        box(g, ((xs0 + xs1) / 2, yb, -20), ((xs1 - xs0) / 2 + 200, 700, 40), 0.0, (0.60, 0.55, 0.47))
-        for k in range(3):
-            xa = xs0 + (k + 0.5) * (xs1 - xs0) / 3
-            box(g, (xa, yb, -150), (90, 650, 110), 0.0, (0.55, 0.50, 0.42))
-    # ---- Haussmann blocks everywhere else, streetlamps along the streets ----
-    step = 3300.0
-    for ix in range(-12, 13):
-        for iy in range(-12, 13):
-            cx, cy = ix * step, iy * step
-            d = math.hypot(cx, cy)
-            if d < 11500 or d > 38000:
-                continue
-            if cx > 3500 and abs(cy) < 9500 and cx < 14000:          # the main stand
-                continue
-            if cx < -6200 and abs(cy) < 5200 and cx > -25000:        # Champ de Mars + tower
-                continue
-            if xs0 - 1800 < cx < xs1 + 1800:                          # the river
-                continue
-            for sx in (-1, 1):
-                for sy in (-1, 1):
-                    hx = 650 + rng.uniform(-60, 60); hy = 650 + rng.uniform(-60, 60)
-                    _haussmann(g, cx + sx * 660, cy + sy * 660, hx, hy, rng.uniform(1900, 2500), rng)
-            lx, ly = cx + step / 2, cy + step / 2
-            box(g, (lx, ly, 200), (14, 14, 260), 0.0, (0.12, 0.12, 0.13))
-            box(g, (lx, ly, 490), (40, 40, 45), 0.0, (1.0, 0.82, 0.52), emis=1.8, kind=2)
-    # Sacre-Coeur on its hill, far behind the orange goal
-    lathe(g, (7000, 40000, -60), [(9000, 0), (6500, 900), (3500, 2100), (0, 2500)], 14,
+        g.tris(np.array([[(0, 0, -60), (7250 * math.cos(a0), 7250 * math.sin(a0), -60), (7250 * math.cos(a1), 7250 * math.sin(a1), -60)]]),
+               pink)
+    # ---- the two long stands: blue (-x) and orange (+x) ----
+    _curved_stand(g, eggs, 1, rng, (0.30, 0.55, 1.0), (0.10, 0.16, 0.40))
+    _curved_stand(g, eggs, -1, rng, (1.0, 0.50, 0.12), (0.48, 0.18, 0.05))
+    # ---- the garden behind the blue goal: pink paths, lawn beds, the golden-sphere fountain, topiaries,
+    #      statues, lamps ----
+    g.quads((-7500, -6300, -59), (7500, -6300, -59), (7500, -15500, -59), (-7500, -15500, -59), pink)
+    for sx in (-1, 1):
+        xa, xb = sorted((sx * 1900.0, sx * 6200.0))
+        _parterre(g, xa, -12800, xb, -10200)
+        _parterre(g, xa, -9300, xb, -7000)
+        for y in (-7200, -8800, -10500, -12200):
+            _topiary(g, sx * 1350, y, rng.uniform(650, 850), rng)
+        for (x, y) in ((sx * 1700, -6800), (sx * 1700, -13200)):
+            box(g, (x, y, 60), (140, 140, 120), 0.0, (0.84, 0.84, 0.84))
+            ico(g, (x, y, 330), 150, (0.78, 0.78, 0.80), rng, sub=1, jit=0.3, squash=1.6)
+        for y in np.arange(-6800, -15000, -1600):
+            box(g, (sx * 6700, y, 300), (16, 16, 360), 0.0, (0.12, 0.12, 0.14))
+            ico(g, (sx * 6700, y, 700), 55, (1.0, 0.88, 0.62), rng, sub=0, jit=0.0, emis=1.8, kind=2)
+    _fountain(g, 0, -9950, rng)
+    for x in np.arange(-7200, 7300, 1200):
+        _plane_tree(g, x + rng.uniform(-100, 100), -15000 + rng.uniform(-150, 150), rng.uniform(1300, 1700), rng)
+    # ---- the Champ de Mars behind the orange goal, leading to the tower ----
+    g.quads((-3200, 6600, -58), (3200, 6600, -58), (3200, 24000, -58), (-3200, 24000, -58), (0.11, 0.29, 0.09))
+    for sx in (-1, 1):
+        g.quads((sx * 3200, 6600, -59), (sx * 4600, 6600, -59), (sx * 4600, 24000, -59), (sx * 3200, 24000, -59), (0.55, 0.47, 0.40))
+        for y in np.arange(7200, 23800, 950):
+            _plane_tree(g, sx * (5000 + rng.uniform(-60, 60)), y, rng.uniform(1200, 1500), rng)
+            _plane_tree(g, sx * (6100 + rng.uniform(-60, 60)), y + 475, rng.uniform(1200, 1500), rng)
+        for y in np.arange(7000, 24000, 2000):
+            box(g, (sx * 3400, y, 280), (14, 14, 340), 0.0, (0.12, 0.12, 0.14))
+            ico(g, (sx * 3400, y, 650), 50, (1.0, 0.88, 0.62), rng, sub=0, jit=0.0, emis=1.8, kind=2)
+    _eiffel(g, 0.0, 28500.0, 26000.0)
+    # ---- the city: varied Haussmann blocks around, a few landmarks ----
+    placed, tries = [], 0
+    while len(placed) < 170 and tries < 6000:
+        tries += 1
+        r = rng.uniform(15500, 42000); a = rng.uniform(0, 2 * math.pi)
+        x, y = r * math.cos(a), r * math.sin(a)
+        if abs(x) < 7500 and 5500 < y < 36000:                  # Champ de Mars + tower
+            continue
+        if abs(x) < 9000 and -17500 < y < 0:                    # garden
+            continue
+        hx, hy = rng.uniform(700, 1700), rng.uniform(600, 1400)
+        if any(abs(x - px) < hx + phx + 450 and abs(y - py) < hy + phy + 450 for px, py, phx, phy in placed):
+            continue
+        placed.append((x, y, hx, hy))
+        _building(g, x, y, hx, hy, rng.uniform(1500, 2900), rng)
+    for _ in range(80):                                                                    # street trees
+        r = rng.uniform(13000, 30000); a = rng.uniform(0, 2 * math.pi)
+        x, y = r * math.cos(a), r * math.sin(a)
+        if any(abs(x - px) < phx + 300 and abs(y - py) < phy + 300 for px, py, phx, phy in placed):
+            continue
+        _plane_tree(g, x, y, rng.uniform(1100, 1500), rng)
+    # Les Invalides: a golden ribbed dome on a drum
+    ic = (-19000.0, 16000.0)
+    box(g, (ic[0], ic[1], 700), (2600, 2000, 760), 0.0, (0.80, 0.75, 0.64), kind=3, top=(0.25, 0.27, 0.32))
+    frustum(g, (ic[0], ic[1], 1460), 1100, 1100, 0, 900, 16, (0.80, 0.75, 0.64))
+    lathe(g, (ic[0], ic[1], 2360), [(1150, 0), (1100, 500), (900, 950), (520, 1300), (0, 1450)], 16,
+          lambda nz, zf, q: (0.95, 0.72, 0.28) if q < 0.5 else (0.26, 0.28, 0.33), emis=0.12)
+    frustum(g, (ic[0], ic[1], 3810), 160, 20, 0, 1100, 8, (1.0, 0.78, 0.30), emis=0.3)
+    # Sacre-Coeur on its hill, far away
+    lathe(g, (9000, 41000, -60), [(9000, 0), (6500, 900), (3500, 2100), (0, 2500)], 14,
           lambda nz, zf, q: (0.12 + 0.03 * q, 0.20 + 0.03 * q, 0.10), rng=rng, jitter=0.06)
-    bc = (7000, 40000, 2380)
+    bc = (9000, 41000, 2380)
     box(g, (bc[0], bc[1], bc[2] + 600), (1500, 900, 600), 0.0, (0.92, 0.90, 0.84), emis=0.15)
     lathe(g, (bc[0], bc[1], bc[2] + 1200), [(700, 0), (700, 500), (650, 900), (480, 1350), (220, 1650), (0, 1780)], 12,
           lambda nz, zf, q: (0.94, 0.92, 0.86), emis=0.15)
     for dx, dy in ((-1000, -500), (1000, -500), (-1000, 500), (1000, 500)):
         lathe(g, (bc[0] + dx, bc[1] + dy, bc[2] + 1200), [(280, 0), (280, 200), (220, 450), (0, 620)], 10,
               lambda nz, zf, q: (0.94, 0.92, 0.86), emis=0.15)
+    # the Arc de Triomphe
+    ac = (21000.0, 24000.0)
+    for sx in (-1, 1):
+        q = _xf([(sx * 1100, 0, 0)], (ac[0], ac[1], 0), 0.4)[0]
+        box(g, (q[0], q[1], 1400), (650, 1000, 1460), 0.4, (0.85, 0.80, 0.68))
+    box(g, (ac[0], ac[1], 2560), (1750, 1000, 300), 0.4, (0.85, 0.80, 0.68), emis=0.1)
     return g.array(), np.concatenate(eggs).astype("f4")
 
 
 # ------------------------------------------------------------------------------------------------ space
+def _asteroid(g, c, r, col, rng, sub):
+    V, F = _ico_base(sub)
+    disp = np.ones(len(V))
+    for k in range(7):
+        d = rng.normal(size=3); d /= np.linalg.norm(d)
+        disp += (0.16 / (1.0 + 0.6 * k)) * np.cos(rng.uniform(1.5, 3.5) * (1 + k * 0.6) * (V @ d) * 2.0 + rng.uniform(0, 6.3))
+    P = V * disp[:, None] * r * rng.uniform(0.65, 1.0, 3)[None, :]
+    th = rng.uniform(0, 2 * math.pi)
+    ca, sa = math.cos(th), math.sin(th)
+    P = np.stack([P[:, 0] * ca - P[:, 2] * sa, P[:, 1], P[:, 0] * sa + P[:, 2] * ca], 1) + np.asarray(c)
+    g.tris(P[F], col, 0.0, 10)
+
+
 def build_space(seed=31):
     rng = np.random.default_rng(seed)
     g, eggs = G(), []
@@ -699,14 +924,6 @@ def build_space(seed=31):
         x, y = (R - 180) * math.cos(a), (R - 180) * math.sin(a)
         box(g, (x, y, 80), (40, 40, 140), a, (0.2, 0.22, 0.25))
         box(g, (x, y, 240), (46, 46, 22), a, cyan, emis=2.2, kind=7)
-    # floating spectator decks (+-x): white metal stands with neon edges
-    for sx in (-1, 1):
-        stand(g, eggs, (sx * 5500.0, 0.0, 120.0), (0, 1, 0), (sx, 0, 0), 18, 9200, 115.0, 85.0, 70.0, rng,
-              tread=(0.70, 0.73, 0.78), riser=(0.20, 0.22, 0.26), rail=(0.85, 0.88, 0.92))
-        xe = sx * (5500 + 18 * 115)
-        box(g, (xe + sx * 120, 0, 1000), (120, 4700, 1100), 0.0, (0.72, 0.75, 0.80), kind=5)
-        box(g, (sx * 5480, 0, 90), (20, 4620, 16), 0.0, (0.3, 0.6, 1.0) if sx < 0 else (1.0, 0.55, 0.2), emis=2.2, kind=7)
-        box(g, (xe + sx * 245, 0, 2080), (8, 4600, 20), 0.0, cyan, emis=2.0, kind=7)
     # neon gates behind the goals, in the team colours
     for sy, col in ((-1, (0.25, 0.55, 1.0)), (1, (1.0, 0.50, 0.15))):
         for i in range(24):
@@ -718,13 +935,17 @@ def build_space(seed=31):
             q = [(x, y + sy * 200, z) for x, y, z in p]
             g.quads(p[0], p[1], q[1], q[0], (0.2, 0.22, 0.26), 0.0, 5)
             g.quads(*q, col, 2.2, 7)
-    # asteroids
+    # asteroids: smooth lumpy shapes (low-frequency displacement, 320 triangles for the big ones) with rock detail
+    # and crater-like spots drawn per pixel (SCENE kind 10)
     for _ in range(90):
-        r = rng.uniform(14000, 60000); a = rng.uniform(0, 2 * math.pi)
+        r = rng.uniform(16000, 62000); a = rng.uniform(0, 2 * math.pi)
         z = rng.uniform(-16000, 18000)
-        s = rng.uniform(200, 900) if rng.random() < 0.7 else rng.uniform(1200, 3600)
-        col = (0.32, 0.29, 0.27) if rng.random() < 0.6 else (0.40, 0.33, 0.26)
-        ico(g, (r * math.cos(a), r * math.sin(a), z), s, col, rng, sub=1, jit=0.35, squash=rng.uniform(0.6, 1.0), colvar=0.15)
+        big = rng.random() > 0.7
+        sz = rng.uniform(1300, 3600) if big else rng.uniform(250, 900)
+        if big and r < 22000:
+            r += 8000
+        col = (0.34, 0.31, 0.29) if rng.random() < 0.6 else (0.42, 0.35, 0.28)
+        _asteroid(g, (r * math.cos(a), r * math.sin(a), z), sz, col, rng, 3 if big else 2)
     # a space station: hub, ring with lit windows, spokes, solar wings, blinking beacons
     sc = np.array([26000.0, 30000.0, 12000.0])
     frustum(g, (sc[0], sc[1], sc[2] - 3500), 1400, 1400, 0, 7000, 12, (0.72, 0.74, 0.78), kind=5)
@@ -749,7 +970,7 @@ def build_space(seed=31):
     lathe(g, dc, [(0, 0), (900, 120), (1800, 420), (2600, 950)], 14, lambda nz, zf, q: (0.78, 0.80, 0.84), kind=5)
     box(g, (dc[0], dc[1], dc[2] - 1500), (120, 120, 1500), 0.0, (0.5, 0.52, 0.56))
     box(g, (dc[0], dc[1], dc[2] + 1400), (60, 60, 60), 0.0, (1.0, 0.2, 0.1), emis=2.5, kind=2)
-    return g.array(), np.concatenate(eggs).astype("f4")
+    return g.array(), np.zeros((0, 8), "f4")                  # no crowd in orbit
 
 
 BUILDERS = {"temple": build_temple, "paris": build_paris, "space": build_space}

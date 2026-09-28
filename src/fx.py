@@ -273,8 +273,8 @@ class FX:
                     g[k] = (x, y, 10.0, 1.0, 0.62, 0.15, 0.30 * pulse, 110.0); k += 1
             else:
                 p = float(prog)
-                g[k] = (x, y, 12.0, 1.0, 0.12 + 0.43 * p, 0.03 + 0.07 * p, 0.10 + 0.28 * p,
-                        (260.0 if big else 110.0)); k += 1
+                if not big:          # an empty BIG pad has no red/orange glow dome until it respawns
+                    g[k] = (x, y, 12.0, 1.0, 0.12 + 0.43 * p, 0.03 + 0.07 * p, 0.10 + 0.28 * p, 110.0); k += 1
                 if ghost > 0.0:
                     # the returning orb's blur: a soft whitish halo spilling past its dissolved silhouette,
                     # shrinking and fading as the orb comes into focus
