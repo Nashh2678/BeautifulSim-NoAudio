@@ -453,12 +453,10 @@ class RSVRenderer:
             _write_settings({"map": name})
         print("[map] {}".format(rl_maps.TITLE[name]), flush=True)
 
-    def _cheer_level(self):
-        """Crowd excitement after a goal / save: up in 0.15 s, held ~2.5 s, eased out by ~4.5 s."""
-        dt = time.time() - self._cheer_t
-        if dt < 0.0 or dt > 4.5:
-            return 0.0
-        return min(1.0, dt / 0.15) * (1.0 - max(0.0, (dt - 2.5) / 2.0) ** 2)
+    def _cheer_ages(self):
+        """Seconds since the last goal / save each crowd (blue fans, orange fans) cheers for -> CROWD_VERT."""
+        now = time.time()
+        return (min(now - self._cheer_t[0], 1e4), min(now - self._cheer_t[1], 1e4))
 
     def _render_scenery(self, vp_bytes, cam_bytes, tnow):
         if self.map_name == "valley":                      # landscape.py's valley + the extras (maps.build_valley)
@@ -480,7 +478,7 @@ class RSVRenderer:
             pc["m_vp"].write(vp_bytes)
             pc["camPos"].write(cam_bytes)
             pc["time"].value = tnow
-            pc["cheer"].value = self._cheer_level()
+            pc["cheerAge"].value = self._cheer_ages()
             self.ctx.disable(moderngl.CULL_FACE)
             self.ctx.enable_direct(0x809E)                 # GL_SAMPLE_ALPHA_TO_COVERAGE: smooth egg edges
             cvao.render(moderngl.TRIANGLES, instances=n_eggs)
@@ -790,7 +788,7 @@ class RSVRenderer:
         self.prog_crowd = self.ctx.program(vertex_shader=rl_shaders.CROWD_VERT, fragment_shader=rl_shaders.CROWD_FRAG)
         self.egg_vbo = self.ctx.buffer(np.array([(-1, 0), (1, 0), (1, 1), (-1, 0), (1, 1), (-1, 1)], "f4").tobytes())
         self._scenes = {}
-        self._cheer_t = -1e9
+        self._cheer_t = [-1e9, -1e9]            # last goal / save each crowd cheers for: blue fans, orange fans
         saved_map = _read_settings().get("map", "valley")
         self.set_map(saved_map if saved_map in rl_maps.ORDER else "valley", save=False)
 
@@ -2504,6 +2502,15 @@ class RSVRenderer:
                 d /= np.linalg.norm(d)
                 self.fx.add_beam(tuple(top), tuple(top + d * 45000.0), 60.0, 3200.0, (0.62, 0.78, 1.0, 0.16),
                                  (0.62, 0.78, 1.0, 0.0))
+        if self.map_name == "space":                   # the cruiser's engine exhaust plumes (additive, flickering)
+            for ex, ez, r, ln in ((7200.0, 2600.0, 1250.0, 9000.0), (-7200.0, 2600.0, 1250.0, 9000.0),
+                                  (0.0, -1700.0, 1500.0, 11000.0), (4600.0, -1500.0, 1100.0, 8000.0), (-4600.0, -1500.0, 1100.0, 8000.0)):
+                fl = 0.85 + 0.15 * math.sin(tnow * 23.0 + ex)
+                y0 = -24420.0 if abs(ex) > 7000 else -23200.0
+                self.fx.add_beam((ex, y0, ez), (ex, y0 - ln * 0.55 * fl, ez), r * 1.1, r * 0.2,
+                                 (0.75, 0.92, 1.0, 0.35 * fl), (0.4, 0.6, 1.0, 0.0))            # hot core
+                self.fx.add_beam((ex, y0, ez), (ex, y0 - ln * fl, ez), r * 2.2, r * 0.8,
+                                 (0.35, 0.6, 1.0, 0.12 * fl), (0.2, 0.35, 1.0, 0.0))            # soft outer glow
         self.fx.render(vp_bytes, px_scale, camera_pos)
 
         if PERF:
@@ -2722,9 +2729,9 @@ class RSVRenderer:
                 # big pad = Play_Boost_Pickup_Pad_Local, small pad = Play_Boost_Pickup_Pill_Local
                 a.play("pad_pickup" if ev.get("big") else "pad_pickup_small", pos, 0.9, True)
         elif k == "save":
-            self._cheer_t = time.time()                    # the crowd jumps on its seats
+            self._cheer_t = [time.time(), time.time()]     # a save: both teams' fans jump on their seats
         elif k == "goal":
-            self._cheer_t = time.time()
+            self._cheer_t[int(ev.get("team", 0)) & 1] = time.time()   # a goal: the scoring team's fans
             self._goal_banner = (int(ev.get("team", 0)) & 1, time.time())
             a.play("goal_explosion_default", pos, 1.0, True)
             a.play("goal_explosion", pos, 0.8, True)             # the goal event layer on top

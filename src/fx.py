@@ -574,10 +574,6 @@ class FX:
             _sp(self.alpha, np.repeat(pos[None, :], n, 0) + d * 80 * S, d * 220 * S + np.array([0, 0, 260 * S], "f4"),
                              rng.uniform(1.2, 2.0, n), 140.0 * S, 420.0 * S, np.array([0.50, 0.47, 0.45, 0.30], "f4"),
                              np.array([0.42, 0.42, 0.44, 0.0], "f4"), drag=1.6)
-            # 7) shockwave rings (ground + vertical)
-            self.ring(pos, (0, 0, 1), 40.0 * S, 760.0 * S, 0.35 * T, 0.07, (1.0, 0.65, 0.25, 0.9), core=(1.0, 0.95, 0.85))
-            self.ring(pos, (0, 1, 0), 40.0 * S, 520.0 * S, 0.28 * T, 0.06, (1.0, 0.75, 0.35, 0.7), core=(1.0, 0.95, 0.85),
-                      billboard=True)
         elif k == "goal":
             # GOAL_FX_SPEED: the goal explosion plays at 70% speed -- same shapes and extent, just slower
             # (speeds and growth x0.7, lifetimes / 0.7, drag x0.7, gravity x0.7^2)

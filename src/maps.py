@@ -19,7 +19,7 @@ import numpy as np
 ORDER = ["valley", "temple", "paris", "space"]
 MAP_ID = {k: i for i, k in enumerate(ORDER)}
 TITLE = {"valley": "Evening Valley", "temple": "Forbidden Temple", "paris": "Parc de Paris", "space": "Orbit"}
-SCENE_VERSION = 19
+SCENE_VERSION = 21
 
 
 def _n(v):
@@ -330,7 +330,7 @@ def stand(g, eggs, origin, u, v, rows, length, depth, rise, pitch, rng, tread, r
 
 # ------------------------------------------------------------------------------------------------ temple
 def _pagoda(g, x, y, z, tiers, w, th, rng, yaw=0.0):
-    wall, roofc, soff, gold = (0.50, 0.09, 0.07), (0.10, 0.13, 0.16), (0.30, 0.08, 0.06), (0.95, 0.70, 0.30)
+    wall, roofc, soff, gold = (0.50, 0.09, 0.07), (0.20, 0.26, 0.32), (0.30, 0.08, 0.06), (0.95, 0.70, 0.30)
     box(g, (x, y, z + 120), (w * 0.75, w * 0.75, 120), yaw, (0.30, 0.28, 0.27))            # terrace
     z += 240
     for t in range(tiers):
@@ -343,7 +343,7 @@ def _pagoda(g, x, y, z, tiers, w, th, rng, yaw=0.0):
             box(g, (cx, cy, z + th * 0.5), (6, w * 0.30, th * 0.26), a, (1.0, 0.55, 0.25), emis=1.3, kind=16)
         z += th
         roof(g, (x, y), w * 0.5, w * 0.5, z, th * 0.55, w * 0.30, th * 0.38, yaw, roofc, soffit=soff, kind=12)
-        box(g, (x, y, z - 30), (w * 0.5 + 12, w * 0.5 + 12, 18), yaw, gold, emis=0.25)   # gilded band
+        box(g, (x, y, z - 30), (w * 0.5 + 12, w * 0.5 + 12, 18), yaw, (0.62, 0.45, 0.20))   # gilded band
         w *= 0.80
         z += th * 0.35
     frustum(g, (x, y, z), w * 0.12, w * 0.02, 0, th * 1.6, 6, gold, emis=0.35)
@@ -352,7 +352,7 @@ def _pagoda(g, x, y, z, tiers, w, th, rng, yaw=0.0):
 
 
 def _paifang(g, x, y, yaw, W=5400.0, H=3900.0):
-    red, blue, gold, stone, roofc = (0.48, 0.07, 0.06), (0.10, 0.22, 0.42), (0.95, 0.72, 0.30), (0.34, 0.32, 0.31), (0.08, 0.11, 0.16)
+    red, blue, gold, stone, roofc = (0.48, 0.07, 0.06), (0.10, 0.22, 0.42), (0.95, 0.72, 0.30), (0.34, 0.32, 0.31), (0.20, 0.26, 0.32)
     xs = (-W / 2, -W / 6, W / 6, W / 2)
     for i, px in enumerate(xs):
         h = H if 0 < i < 3 else H * 0.72
@@ -372,7 +372,7 @@ def _paifang(g, x, y, yaw, W=5400.0, H=3900.0):
 
 
 def _hall(g, x, y, W, D, H, rng, yaw=0.0):
-    stone, red, roofc, paper = (0.33, 0.31, 0.30), (0.50, 0.09, 0.07), (0.09, 0.12, 0.16), (1.0, 0.58, 0.28)
+    stone, red, roofc, paper = (0.33, 0.31, 0.30), (0.50, 0.09, 0.07), (0.20, 0.26, 0.32), (1.0, 0.58, 0.28)
     box(g, (x, y, 60), (W / 2 + 700, D / 2 + 700, 120), yaw, stone)
     for k in range(4):                                                                    # front steps
         p = _xf([(0, D / 2 + 700 + 150 + k * 150, 0)], (x, y, 0), yaw)[0]
@@ -439,7 +439,7 @@ def build_temple(seed=11):
     for k in range(13):
         yy = -5400 + k * 900
         box(g, (xb + 300, yy, top + 450), (60, 60, 450), 0.0, (0.50, 0.09, 0.07))
-    roof(g, (xb + 100, 0), 520, 5500, top + 900, 520, 420, 260, 0.0, (0.09, 0.12, 0.16), soffit=(0.30, 0.07, 0.05), kind=12)
+    roof(g, (xb + 100, 0), 520, 5500, top + 900, 520, 420, 260, 0.0, (0.20, 0.26, 0.32), soffit=(0.30, 0.07, 0.05), kind=12)
     for k in range(25):                                                                    # lantern row
         yy = -5300 + k * 440
         ico(g, (xb + 560, yy, top + 700), 55, (1.0, 0.28, 0.10), rng, sub=0, jit=0.0, squash=1.3, emis=1.6, kind=2)
@@ -597,7 +597,7 @@ def _arc_pt(C, s, r, a):
     return (C[0] + s * r * math.cos(a), C[1] + r * math.sin(a))
 
 
-def _curved_stand(g, eggs, s, rng, team_col, team_dark, amax=0.235, Lc=30000.0, x0=5350.0):
+def _curved_stand(g, eggs, s, rng, team_col, team_dark, amax=0.235, Lc=30000.0, x0=5350.0, fans=0):
     """One long side stand (s=+1 on +x, -1 on -x): two curved tiers facing the pitch, a sweeping roof with
     floodlights and banners, end walls with graffiti. Eggs on every seat."""
     C = (-s * Lc, 0.0)
@@ -626,7 +626,7 @@ def _curved_stand(g, eggs, s, rng, team_col, team_dark, amax=0.235, Lc=30000.0, 
             px = C[0] + s * rr * np.cos(ang); py = C[1] + rr * np.sin(ang)
             pz = np.full(len(ang), zt)
             cols = EGG_COLS[rng.integers(0, len(EGG_COLS), len(ang))] * rng.uniform(0.85, 1.1, (len(ang), 1))
-            eggs.append(np.concatenate([np.stack([px, py, pz], 1), np.clip(cols, 0, 1), rng.random((len(ang), 1)),
+            eggs.append(np.concatenate([np.stack([px, py, pz], 1), np.clip(cols, 0, 1), fans + 0.999 * rng.random((len(ang), 1)),
                                         (74.0 * rng.uniform(0.9, 1.1, len(ang)))[:, None]], 1))
         # the solid body under the tier (seen from below / the ends)
         r_end = r_start + rows * depth
@@ -814,8 +814,8 @@ def build_paris(seed=21):
         g.tris(np.array([[(0, 0, -60), (7250 * math.cos(a0), 7250 * math.sin(a0), -60), (7250 * math.cos(a1), 7250 * math.sin(a1), -60)]]),
                pink)
     # ---- the two long stands: blue (-x) and orange (+x) ----
-    _curved_stand(g, eggs, 1, rng, (0.30, 0.55, 1.0), (0.10, 0.16, 0.40))
-    _curved_stand(g, eggs, -1, rng, (1.0, 0.50, 0.12), (0.48, 0.18, 0.05))
+    _curved_stand(g, eggs, 1, rng, (0.30, 0.55, 1.0), (0.10, 0.16, 0.40), fans=1)
+    _curved_stand(g, eggs, -1, rng, (1.0, 0.50, 0.12), (0.48, 0.18, 0.05), fans=2)
     # ---- the garden behind the blue goal: pink paths, lawn beds, the golden-sphere fountain, topiaries,
     #      statues, lamps ----
     g.quads((-7500, -7250, -54), (7500, -7250, -54), (7500, -15500, -54), (-7500, -15500, -54), pink)
@@ -950,6 +950,28 @@ def build_space(seed=31):
             g.quads((fa1[0] - sx * 6, ya, fa1[2] - 90), (fb1[0] - sx * 6, yb, fb1[2] - 90), (fb1[0] - sx * 6, yb, fb1[2] - 40),
                     (fa1[0] - sx * 6, ya, fa1[2] - 40), cyan, 2.0, 7)
             g.quads((fa0[0] - sx * 4, ya, -58), (fb0[0] - sx * 4, yb, -58), (fb0[0] - sx * 34, yb, -58), (fa0[0] - sx * 34, ya, -58), cyan, 1.6, 7)
+    # livery: a painted stripe along the inside of both flanks, gun turrets on the flank tops
+    for i in range(len(ys) - 1):
+        ya, yb = ys[i], ys[i + 1]
+        if yb > 34000:
+            continue
+        for sx in (-1, 1):
+            wa, wb = hws[i], hws[i + 1]
+            ta, tb = FL_H * min(1.0, wa / 6000.0), FL_H * min(1.0, wb / 6000.0)
+            for f0, f1, col in ((0.62, 0.70, (0.72, 0.12, 0.10)), (0.72, 0.76, (0.85, 0.85, 0.88))):
+                pa0 = (sx * (wa - FL_IN + (FL_IN + FL_OUT) * f0 - 14), ya, -60 + (ta + 60) * f0)
+                pa1 = (sx * (wa - FL_IN + (FL_IN + FL_OUT) * f1 - 14), ya, -60 + (ta + 60) * f1)
+                pb0 = (sx * (wb - FL_IN + (FL_IN + FL_OUT) * f0 - 14), yb, -60 + (tb + 60) * f0)
+                pb1 = (sx * (wb - FL_IN + (FL_IN + FL_OUT) * f1 - 14), yb, -60 + (tb + 60) * f1)
+                g.quads(pa0, pb0, pb1, pa1, col)
+    for y in (-9000.0, -2000.0, 5000.0, 12000.0, 19000.0):
+        w = hw_at(y)
+        for sx in (-1, 1):
+            top = FL_H * min(1.0, w / 6000.0)
+            cx_ = sx * (w + FL_OUT * 0.5)
+            lathe(g, (cx_, y, top - 40), [(620, 0), (600, 180), (380, 420), (0, 480)], 14, lambda nz, zf, q: (0.40, 0.42, 0.46), kind=5)
+            for bx in (-150, 150):
+                _cyl_y(g, cx_ + bx, top + 250, y + 200, y + 2400, 70, 55, 8, (0.28, 0.30, 0.34), kind=5)
     # ribs on the inside of the flanks, every 3000 uu, with a light at the top
     for y in np.arange(-15000, 30001, 3000):
         w = hw_at(y)
@@ -976,13 +998,16 @@ def build_space(seed=31):
         ya_, yb_ = by1 - 2500 * f0 + 12, by1 - 2500 * f1 + 12
         g.quads((-bw * (1 - 0.25 * f0) * 0.85, ya_, za), (bw * (1 - 0.25 * f0) * 0.85, ya_, za),
                 (bw * (1 - 0.25 * f1) * 0.85, yb_, zb), (-bw * (1 - 0.25 * f1) * 0.85, yb_, zb), (0.75, 0.93, 1.0), 1.5, 2)
-    for ax, h in ((-1800, 2000), (1400, 1500)):
+    for ax, h in ((-1800, 2000), (1400, 1500)):                         # antenna masts
         box(g, (ax, by0 + 800, 3800 + h / 2), (30, 30, h / 2), 0.0, (0.5, 0.52, 0.56))
         box(g, (ax, by0 + 800, 3800 + h + 30), (45, 45, 45), 0.0, (1.0, 0.15, 0.1), emis=2.6, kind=2)
+    # a radar dish on the bridge roof, tilted up
+    lathe(g, (0.0, by0 + 1800, 4100), [(0, 0), (500, 70), (1000, 250), (1350, 520)], 16, lambda nz, zf, q: (0.78, 0.80, 0.84), kind=5)
+    frustum(g, (0.0, by0 + 1800, 3800), 160, 120, 0, 320, 8, (0.45, 0.47, 0.5))
     # two engine nacelles on pylons behind the bridge (seen past the blue goal) + the main engine block
     for sx in (-1, 1):
         ex, ez = sx * 7200.0, 2600.0
-        _cyl_y(g, ex, ez, -12000, -24000, 1500, 1500, 20, hullc, kind=15)
+        _cyl_y(g, ex, ez, -12000, -24000, 1500, 1500, 20, hullc, kind=5)
         _cyl_y(g, ex, ez, -12000, -11000, 1500, 400, 20, hullc, kind=5, cap=((0.3, 0.32, 0.36), 0.0, 5))
         _cyl_y(g, ex, ez, -24000, -24400, 1500, 1250, 20, (0.2, 0.21, 0.24), kind=5, cap=((0.55, 0.85, 1.0), 3.0, 2))
         _cyl_y(g, ex, ez, -24380, -24420, 1600, 1600, 20, (0.45, 0.8, 1.0), emis=2.4, kind=7)
@@ -1016,11 +1041,15 @@ def build_space(seed=31):
             g.quads(*q, col, 2.2, 7)
     # an asteroid belt the ship flies past, and a station farther out
     tilt = math.radians(14.0)
-    for _ in range(110):
+    placed = 0
+    while placed < 100:                                  # beside and below the ship, never in front of it
         th = rng.uniform(0, 2 * math.pi)
-        r = rng.uniform(46000, 66000)
+        if abs(math.cos(th)) < 0.55:
+            continue
+        r = rng.uniform(40000, 64000)
         x, y = r * math.cos(th), r * math.sin(th)
-        z = math.sin(th) * r * math.tan(tilt) - 6000 + rng.normal(0, 1500)
+        z = -5000 + y * math.tan(tilt) * 0.15 + rng.normal(0, 2200)
+        placed += 1
         big = rng.random() > 0.72
         sz = rng.uniform(1500, 3800) if big else rng.uniform(300, 1000)
         col = (0.34, 0.31, 0.29) if rng.random() < 0.6 else (0.42, 0.35, 0.28)

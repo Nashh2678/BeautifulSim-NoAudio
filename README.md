@@ -89,8 +89,9 @@ there are git-ignored, so they never get committed by accident.
   down the Champ de Mars; and a star cruiser in orbit, the arena on its flight deck between armoured hull
   flanks (stars of many shades, the Milky Way,
   a ringed gas giant, a moon, the planet below, an asteroid belt, a station; no crowd). Each has its own
-  sky, light and field style, and a crowd of eggs that jumps on its seats after goals and saves (a save = a
-  defender's touch on a ball that was going in).
+  sky, light and field style, and a crowd of eggs: about 30% of the fans are always cheering; after a save both
+  teams' fans jump on their seats, after a goal only the scoring team's (in Paris each stand is one team's). A save =
+  a defender's touch on a ball that was going in.
 - **Arena**: see-through hexagon walls and ceiling, a grass pitch with Rocket League-style team markings (striped
   zones in front of each goal, split centre circle, team lanes), team-coloured floor-to-wall curves, translucent team
   nets, soft shadows, a low-poly valley with mountains, trees and a lake under an evening sky.

@@ -1460,17 +1460,20 @@ void main() {
         emis += vec3(0.65, 0.88, 1.0) * 0.06 * step(0.55, h_) * smoothstep(0.35, 1.0, fwh);    // far: a faint average
         spec = 0.3;
     } else if (kind == 12.0) {
-        // glazed roof tiles: rows along the slope with ridges between the columns and a dark gutter per row
-        vec2 rq = vec2(fq.x / 48.0, v_pos.z / 42.0);
+        // glazed barrel tiles: rounded columns running down the slope, a dark gutter under every row, the crowns
+        // catching the sky -- still readable from across the arena (averages to a slightly darker roof far away)
+        vec2 rq = vec2(fq.x / 70.0, v_pos.z / 55.0);
         float fwr = max(length(fwidth(rq)), 1e-4);
+        float det = 1.0 - smoothstep(0.5, 1.2, fwr);
         float ridge = abs(fract(rq.x) - 0.5) * 2.0;
-        float row = fract(rq.y);
-        float tile = (0.82 + 0.25 * (1.0 - ridge * ridge)) * (0.78 + 0.22 * smoothstep(0.0, 0.25, row));
-        alb *= mix(1.0, tile, 1.0 - smoothstep(0.35, 0.9, fwr));
-        spec = 0.35;
+        float barrel = 1.0 - ridge * ridge;
+        float lip = smoothstep(0.0, 0.2, fract(rq.y));
+        alb *= mix(0.82, mix(0.45, 1.25, barrel * lip), det);
+        emis += sky_color(reflect(-V, n)) * 0.12 * barrel * lip * det;
+        spec = 0.4;
     } else if (kind == 13.0) {
-        // temple walls: red lacquered timber -- dark posts every 380 uu, rails every 300 uu, a golden lattice
-        // window in the upper half of every bay
+        // temple walls: red lacquered timber -- dark posts every 380 uu and rails every 300 uu; a golden lattice
+        // window only in some bays (about one in five), dimly lit
         vec2 wq = vec2(fq.x / 380.0, v_pos.z / 300.0);
         vec2 fwq = max(fwidth(wq), vec2(1e-4));
         float det = 1.0 - smoothstep(0.25, 0.7, max(fwq.x, fwq.y));
@@ -1478,12 +1481,13 @@ void main() {
         float post = 1.0 - smoothstep(0.05, 0.05 + fwq.x, min(fr.x, 1.0 - fr.x));
         float rail = 1.0 - smoothstep(0.04, 0.04 + fwq.y, min(fr.y, 1.0 - fr.y));
         float frame = max(post, rail);
-        float win = step(0.18, fr.x) * step(fr.x, 0.82) * step(0.45, fr.y) * step(fr.y, 0.85);
+        float bay = step(0.80, hash1(floor(wq) + floor(v_pos.xy / 5000.0) * 3.7));
+        float win = bay * step(0.2, fr.x) * step(fr.x, 0.8) * step(0.45, fr.y) * step(fr.y, 0.82);
         vec2 lat = abs(fract(fq / vec2(40.0, 40.0)) - 0.5);
         float latt = win * (1.0 - smoothstep(0.10, 0.10 + fwq.x * 9.0, min(lat.x, lat.y)));
         alb = mix(alb, alb * 0.45, frame * det);
-        alb = mix(alb, vec3(0.30, 0.18, 0.08), win * (1.0 - frame) * det * 0.7);
-        emis += vec3(1.0, 0.62, 0.28) * (win * 0.35 + latt * 0.5) * (1.0 - frame) * det;
+        alb = mix(alb, vec3(0.30, 0.18, 0.08), win * (1.0 - frame) * det * 0.6);
+        emis += vec3(1.0, 0.62, 0.28) * (win * 0.18 + latt * 0.30) * (1.0 - frame) * det;
     }
     if (kind == 14.0) em = 0.0;                           // (the emission channel carried the bob phase)
     if (kind == 6.0) alb *= 0.85 + 0.3 * hash1(floor(v_pos.xy / 120.0 + v_pos.z / 90.0));
@@ -1547,7 +1551,7 @@ CROWD_VERT = '''
 uniform mat4 m_vp;
 uniform vec3 camPos;
 uniform float time;
-uniform float cheer;
+uniform vec2 cheerAge;       // seconds since the last goal / save this crowd cheers for: (blue fans, orange fans)
 in vec2 in_corner;           // x -1..1, y 0..1
 in vec3 i_pos;
 in vec3 i_col;
@@ -1558,14 +1562,24 @@ flat out vec3 v_col;
 flat out vec3 v_R;
 flat out vec3 v_F;
 void main() {
-    float ph = i_ps.x, sc = i_ps.y;
-    float jumper = step(0.12, fract(ph * 17.3));                          // a few stay seated
-    float f = 7.5 + 4.0 * fract(ph * 3.1);
-    float hop = abs(sin(time * f + ph * 6.2832));
+    // i_ps.x = crowd (integer part: 0 neutral, 1 blue fans, 2 orange fans) + phase (fraction)
+    float team = floor(i_ps.x), ph = fract(i_ps.x), sc = i_ps.y;
+    float age = team < 0.5 ? min(cheerAge.x, cheerAge.y) : (team < 1.5 ? cheerAge.x : cheerAge.y);
+    // after a goal / save every fan joins after its own delay and stops at its own time, easing in and out
+    float delay = fract(ph * 5.13) * 0.7;
+    float dur = 2.8 + fract(ph * 9.71) * 3.5;
+    float ev = smoothstep(delay, delay + 0.45, age) * (1.0 - smoothstep(dur - 1.4, dur, age));
+    // and about 30% of the fans are always cheering, each drifting in and out over several seconds
+    float nb = 0.5 + 0.25 * sin(time * 0.23 + ph * 61.0) + 0.25 * sin(time * 0.37 + ph * 23.0 + 1.3);
+    float idle = smoothstep(0.48, 0.62, nb) * 0.65;
+    float cheer = max(ev, idle);
+    float jumper = step(0.12, fract(ph * 17.3));                          // a few never get up
+    float f = 7.0 + 4.5 * fract(ph * 3.1);
+    float hop = abs(sin(time * f + ph * 6.2832 + 2.0 * sin(time * 0.5 + ph * 30.0)));
     float j = cheer * jumper * (16.0 + 26.0 * fract(ph * 7.3)) * sc / 60.0 * hop;
-    float idle = 1.2 * sin(time * 1.3 + ph * 40.0);
+    float idleb = 1.2 * sin(time * 1.3 + ph * 40.0);
     float stretch = 1.0 + 0.10 * cheer * jumper * (hop - 0.5);           // stretch in the air, squash landing
-    vec3 base = i_pos + vec3(0.0, 0.0, idle + j);
+    vec3 base = i_pos + vec3(0.0, 0.0, idleb + j);
     vec3 to = camPos - base;
     vec3 F = normalize(vec3(to.xy, 0.0) + vec3(1e-4, 0.0, 0.0));
     vec3 R = vec3(-F.y, F.x, 0.0);
