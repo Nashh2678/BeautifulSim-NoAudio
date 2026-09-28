@@ -437,7 +437,8 @@ class RSVRenderer:
         self.prog_sky["cloudA"].value = tuple(th["cloudA"])
         self.prog_sky["cloudB"].value = tuple(th["cloudB"])
         self.prog_sky["starK"].value = float(th.get("stars", 0.0))
-        if name != "valley" and name not in self._scenes:
+        self.prog_sky["cloudShape"].value = tuple(th.get("cloud_shape", (1.9, 1.9)))
+        if name in rl_maps.BUILDERS and name not in self._scenes:
             mesh, crowd = rl_maps.load_or_build(name, DATA_DIR_PATH)
             vao = self.ctx.vertex_array(self.prog_scene, [(self.ctx.buffer(mesh.tobytes()), "3f 3f 2f",
                                                            "in_position", "in_col", "in_ek")])
@@ -459,11 +460,12 @@ class RSVRenderer:
         return min(1.0, dt / 0.15) * (1.0 - max(0.0, (dt - 2.5) / 2.0) ** 2)
 
     def _render_scenery(self, vp_bytes, cam_bytes, tnow):
-        if self.map_name == "valley":
+        if self.map_name == "valley":                      # landscape.py's valley + the extras (maps.build_valley)
             self.prog_stadium["m_vp"].write(vp_bytes)
             self.prog_stadium["camPos"].write(cam_bytes)
             if "stadium" not in _SKIP:
                 self.stadium_vao.render(moderngl.TRIANGLES, vertices=self.stadium_n)
+        if self.map_name not in self._scenes:
             return
         vao, n, cvao, n_eggs = self._scenes[self.map_name]
         ps = self.prog_scene
@@ -2493,6 +2495,14 @@ class RSVRenderer:
         self.fx.cam_right = np.asarray(cam_r, "f4")
         self.fx.cam_up = np.asarray(pyrr.vector3.cross(cam_r, cam_f), "f4")
         self._update_speed_lines(state, interp_ratio, spectated)
+        if self.map_name == "paris":
+            top = np.array([0.0, 28500.0, 25200.0], "f4")
+            for k in range(2):
+                a = tnow * 0.35 + k * math.pi
+                d = np.array([math.cos(a) * 0.75, math.sin(a) * 0.75, 0.45], "f4")
+                d /= np.linalg.norm(d)
+                self.fx.add_beam(tuple(top), tuple(top + d * 45000.0), 60.0, 3200.0, (0.62, 0.78, 1.0, 0.16),
+                                 (0.62, 0.78, 1.0, 0.0))
         self.fx.render(vp_bytes, px_scale, camera_pos)
 
         if PERF:

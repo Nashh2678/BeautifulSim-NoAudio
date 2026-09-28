@@ -653,6 +653,7 @@ uniform int mapId;         // 0 valley, 1 temple, 2 paris, 3 orbit
 uniform vec4 cloudA;       // cloud colour lit (rgb), coverage threshold (a: lower = more clouds)
 uniform vec4 cloudB;       // cloud colour shadowed (rgb), opacity (a)
 uniform float starK;       // faint stars in the darker upper sky (dusk maps)
+uniform vec2 cloudShape;   // cloud noise scale along x / y (equal = puffy, very unequal = long wisps)
 in vec2 v_ndc;
 out vec4 f_color;
 
@@ -697,22 +698,26 @@ vec3 skyline(vec3 d, vec3 c) {
 float fbm3(vec2 p) { return vnoise(p) * 0.5 + vnoise(p * 2.1 + 3.1) * 0.3 + vnoise(p * 4.3 + 7.7) * 0.2; }
 float hash3(vec3 p) { return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
 
-// stars: one candidate per cell of a 3D grid on the unit sphere, at least ~1 px wide so they never shimmer
-vec3 stars(vec3 d, float scale, float density) {
+// Stars, sized in PIXELS: one candidate per cell of a 3D grid on the unit sphere (`prob` of the cells hold one).
+// Every star is at least ~1 px so it stays visible; most are faint, some medium, a few big and bright, in blue /
+// white / yellow / orange shades. Keep the cells >= ~2 px (scale <= ~300 at 1080p) or they merge.
+vec3 stars(vec3 d, float scale, float prob, float seed) {
     vec3 p = d * scale;
     vec3 cell = floor(p);
-    float h = hash3(cell);
-    if (h < density) return vec3(0.0);
-    vec3 j = vec3(hash3(cell + 1.3), hash3(cell + 2.7), hash3(cell + 5.1)) - 0.5;
-    float dist = length(fract(p) - 0.5 - j * 0.5);
-    float px = max(length(fwidth(p)), 1e-4);
-    float rad = max(0.045, px * 0.7);
-    float b = (1.0 - smoothstep(rad * 0.3, rad, dist)) * (0.35 + 0.65 * fract(h * 37.0));
-    b *= 0.75 + 0.25 * sin(time * (1.5 + 3.0 * fract(h * 91.0)) + h * 50.0);          // twinkle
+    float h = hash3(cell + seed);
+    if (h > prob) return vec3(0.0);
+    h /= prob;
+    vec3 j = vec3(hash3(cell + seed + 1.3), hash3(cell + seed + 2.7), hash3(cell + seed + 5.1)) - 0.5;
+    float px = max(length(fwidth(p)), 1e-4);                   // cells per pixel
+    float dpx = length(fract(p) - 0.5 - j * 0.30) / px;         // distance in pixels (centres kept off the cell edges)
+    float h2 = hash3(cell + seed + 9.9), h3 = hash3(cell + seed + 4.4);
+    float size = 0.55 + 1.0 * pow(h2, 6.0);                     // px radius: mostly ~0.6, a few ~1.5
+    float b = 0.10 + 1.3 * pow(h3, 4.0);                        // mostly faint, a few bright
+    b *= 0.85 + 0.15 * sin(time * (1.3 + 2.5 * fract(h * 91.0)) + h * 50.0);          // slight twinkle
     float tt = fract(h * 13.0);
-    vec3 tint = tt < 0.35 ? vec3(0.72, 0.80, 1.0) : (tt < 0.7 ? vec3(1.0, 0.97, 0.92)
-              : (tt < 0.88 ? vec3(1.0, 0.86, 0.62) : vec3(1.0, 0.62, 0.48)));          // blue, white, yellow, red
-    return tint * b * min(1.0, 0.06 / rad);
+    vec3 tint = tt < 0.30 ? vec3(0.70, 0.80, 1.0) : (tt < 0.72 ? vec3(1.0, 0.98, 0.94)
+              : (tt < 0.90 ? vec3(1.0, 0.88, 0.65) : vec3(1.0, 0.66, 0.50)));
+    return tint * b * exp(-dpx * dpx / (size * size));
 }
 
 // a sphere in the sky seen from the arena: direction P, angular radius R -> coverage (a) and its normal
@@ -741,19 +746,18 @@ vec3 spaceSky(vec3 d) {
     float dust = fbm3(d.yz * 7.0 + 4.0) * tw3.x + fbm3(d.xz * 7.0 + 11.0) * tw3.y + fbm3(d.xy * 7.0 + 17.0) * tw3.z;
     vec2 bq = d.xy * 5.0 + d.z * 3.0;
     float band = exp(-bd * bd / 0.035) * (0.45 + 0.9 * dust);
-    c += band * mix(vec3(0.05, 0.05, 0.09), vec3(0.16, 0.12, 0.10), smoothstep(0.4, 0.9, dust)) * 0.9;
+    c += band * mix(vec3(0.035, 0.04, 0.07), vec3(0.11, 0.11, 0.14), smoothstep(0.35, 0.9, dust)) * 0.8;
     float lanes = fbm3(d.yz * 22.0) * tw3.x + fbm3(d.xz * 22.0 + 5.0) * tw3.y + fbm3(d.xy * 22.0 + 9.0) * tw3.z;
     c -= band * 0.03 * smoothstep(0.55, 0.8, lanes);
     // nebula: soft magenta / teal clouds in one region of the sky
     vec3 NB = normalize(vec3(-0.6, -0.55, 0.35));
     float nd = max(dot(d, NB), 0.0);
     float nm = fbm3(d.xy * 5.0 + d.z * 3.0) * fbm3(d.yz * 3.0 + 9.0);
-    c += (vec3(0.30, 0.05, 0.25) * nm + vec3(0.02, 0.18, 0.22) * (1.0 - nm) * 0.5) * pow(nd, 5.0) * 0.9;
+    c += (vec3(0.28, 0.06, 0.26) * nm + vec3(0.03, 0.14, 0.20) * (1.0 - nm) * 0.4) * pow(nd, 7.0) * 0.8;
     c = max(c, vec3(0.0));
-    c += stars(d, 260.0, 0.93) * 1.1 + stars(d, 700.0, 0.965) * 0.6 + band * stars(d, 1500.0, 0.90) * 0.6;
-    // far away stars: many tiny faint ones of slightly different shades, denser in the Milky Way
-    c += stars(d, 1100.0, 0.90) * 0.30 + stars(d, 2300.0, 0.86) * (0.14 + 0.35 * band);
-    c += stars(d, 90.0, 0.988) * 2.2;                                                   // a few bright ones
+    c += stars(d, 120.0, 0.030, 0.0) * 1.6;                                             // a few bright ones
+    c += stars(d, 190.0, 0.050, 17.0) * 1.0;                                            // the bulk
+    c += stars(d, 270.0, 0.035 + 0.10 * min(band, 1.0), 41.0) * 0.7;                    // faint, denser in the band
     // the star lighting the scene: a hot disc with a wide glare
     float sd = max(dot(d, SUN_DIR), 0.0);
     c += vec3(1.0, 0.97, 0.9) * (smoothstep(0.99955, 0.9997, sd) * 12.0 + pow(sd, 400.0) * 1.5 + pow(sd, 24.0) * 0.08);
@@ -790,15 +794,10 @@ vec3 spaceSky(vec3 d) {
     if (ringFront) c = mix(c, ringC, ringA);
     // two moons
     vec3 mn;
-    vec4 m1 = skySphere(d, normalize(vec3(0.72, 0.30, 0.38)), 0.045, mn);
+    vec4 m1 = skySphere(d, normalize(vec3(0.72, 0.30, 0.38)), 0.05, mn);
     if (m1.a > 0.0) {
         float cr = fbm3(mn.xy * 9.0 + mn.z * 4.0);
         c = mix(c, vec3(0.55, 0.54, 0.52) * (0.7 + 0.5 * cr) * (0.02 + max(dot(mn, SUN_DIR), 0.0)), m1.a);
-    }
-    vec4 m2 = skySphere(d, normalize(vec3(0.15, -0.85, 0.30)), 0.025, mn);
-    if (m2.a > 0.0) {
-        float cr = fbm3(mn.yz * 12.0 + 5.0);
-        c = mix(c, vec3(0.62, 0.48, 0.38) * (0.7 + 0.5 * cr) * (0.02 + max(dot(mn, SUN_DIR), 0.0)), m2.a);
     }
     // the planet far below (the arena is in orbit): ocean, continents, clouds, a blue limb
     if (d.z < -0.28) {
@@ -830,7 +829,7 @@ void main() {
     if (d.z > 0.01) {
         // clouds: a warped fbm on a plane above the arena; lit from the sun side (a brighter rim toward the
         // sun, darker bellies), a thin high layer of wisps on top
-        vec2 uv = d.xy / (d.z + 0.22) * 1.9 + vec2(time * 0.008, time * 0.002);
+        vec2 uv = d.xy / (d.z + 0.22) * cloudShape + vec2(time * 0.008, time * 0.002);
         vec2 w = vec2(vnoise(uv * 0.8 + 11.0), vnoise(uv * 0.8 + 37.0)) - 0.5;
         vec2 q = uv + w * 0.9;
         float dens = vnoise(q) * 0.5 + vnoise(q * 2.2 + 3.1) * 0.28 + vnoise(q * 4.7 + 7.3) * 0.14 + vnoise(q * 9.3) * 0.08;
@@ -848,9 +847,27 @@ void main() {
         c = mix(c, mix(cloudA.rgb, cloudB.rgb, 0.5) * 1.1, wisp * 0.18 * cloudB.a);
         cover = cl * cloudB.a;
     }
+    if (mapId == 1) {
+        // Forbidden Temple: the low sun itself, a soft pink-gold disc with a warm halo
+        float sd = max(dot(d, SUN_DIR), 0.0);
+        c += vec3(1.0, 0.78, 0.62) * smoothstep(0.99935, 0.9996, sd) * 1.6 * (1.0 - cover * 0.7);
+        c += vec3(1.0, 0.55, 0.55) * pow(sd, 300.0) * 0.5;
+    } else if (mapId == 2) {
+        // Parc de Paris: a clear night with the moon
+        vec3 MOON = normalize(vec3(0.55, 0.45, 0.62));
+        vec3 mn;
+        vec4 mm = skySphere(d, MOON, 0.032, mn);
+        float halo = pow(max(dot(d, MOON), 0.0), 700.0) * 0.5 + pow(max(dot(d, MOON), 0.0), 40.0) * 0.06;
+        c += vec3(0.60, 0.65, 0.90) * halo * (1.0 - cover * 0.5);
+        if (mm.a > 0.0) {
+            float ph = 0.25 + 0.75 * max(dot(mn, normalize(-MOON + vec3(0.35, 0.0, 0.1))), 0.0);
+            float mar = vnoise(mn.xz * 6.0 + 3.0) * 0.6 + vnoise(mn.yz * 13.0) * 0.4;
+            c = mix(c, vec3(0.95, 0.94, 0.98) * ph * (0.8 + 0.25 * mar), mm.a * (1.0 - cover * 0.6));
+        }
+    }
     // the first stars in the dark part of the dusk sky
     float sm = starK * smoothstep(0.2, 0.75, d.z) * (1.0 - cover);
-    if (sm > 0.0) c += (stars(d, 380.0, 0.955) + stars(d, 900.0, 0.93) * 0.45) * sm;
+    if (sm > 0.0) c += (stars(d, 150.0, 0.030, 3.0) + stars(d, 240.0, 0.035, 29.0) * 0.6) * sm;
     f_color = vec4(to_srgb(c), 1.0);
 }
 '''
@@ -1287,7 +1304,7 @@ out vec3 v_col;
 flat out vec2 v_ek;
 void main() {
     vec3 p = in_position;
-    if (abs(in_ek.y - 9.0) < 0.5) {
+    if (abs(in_ek.y - 9.0) < 0.5 || abs(in_ek.y - 14.0) < 0.5) {
         float ph = in_ek.x;
         p.z += 90.0 * sin(time * 0.45 + ph * 6.2832);
         p.xy += 40.0 * vec2(sin(time * 0.3 + ph * 11.0), cos(time * 0.27 + ph * 7.0));
@@ -1324,7 +1341,7 @@ void main() {
     vec3 hz = sky_color(vec3(dir.xy, max(dir.z, 0.02)));
     float hk = smoothstep(haze.x, haze.y, dist) * haze.z;
     // face coordinates for the patterns: horizontal position along the wall + height
-    vec2 fq = abs(n.x) > abs(n.y) ? vec2(v_pos.y, v_pos.z) : vec2(v_pos.x, v_pos.z);
+    vec2 fq = abs(n.z) > 0.8 ? v_pos.xy : (abs(n.x) > abs(n.y) ? vec2(v_pos.y, v_pos.z) : vec2(v_pos.x, v_pos.z));
     if (kind == 1.0) {                                      // water: sky reflection with fresnel, soft ripples
         vec3 wn = normalize(vec3(0.03 * sin(v_pos.x / 160.0 + v_pos.y / 230.0 + time * 0.6),
                                  0.03 * sin(v_pos.y / 190.0 - v_pos.x / 310.0 + time * 0.5), 1.0));
@@ -1332,6 +1349,15 @@ void main() {
         vec3 wc = mix(alb * 0.3, sky_color(reflect(-V, wn)), fres);
         wc += SUN_COL * pow(max(dot(reflect(-V, wn), SUN_DIR), 0.0), 200.0) * 2.0;
         f_color = vec4(to_srgb(mix(wc, hz, hk)), 1.0);
+        return;
+    } else if (kind == 16.0) {                             // glowing paper screen behind a dark wooden lattice
+        vec2 lq = fq / 55.0;
+        float fwl = max(length(fwidth(lq)), 1e-4);
+        vec2 lf = abs(fract(lq) - 0.5);
+        float bars = (1.0 - smoothstep(0.38, 0.38 + fwl, max(lf.x, lf.y))) ;
+        float det = 1.0 - smoothstep(0.3, 0.8, fwl);
+        vec3 e = alb * em * mix(1.0, 0.25 + 0.75 * bars, det);
+        f_color = vec4(to_srgb(mix(e, hz, hk * 0.35)), 1.0);
         return;
     } else if (kind == 2.0 || kind == 9.0) {                // lanterns / lamps: glow, a slow flicker each
         float ph = kind == 9.0 ? em * 37.0 : hash1(floor(v_pos.xy / 60.0));
@@ -1351,32 +1377,67 @@ void main() {
         emis += wl * win * lit * 1.1 + wl * (1.0 - smoothstep(0.25, 0.6, fw_) > 0.5 ? 0.0 : 0.12) * lit * 0.5;
         // a balcony line every other floor
         alb *= 1.0 - 0.25 * step(0.9, fract((fq.y - 60.0) / 660.0)) * step(0.0, fq.y - 60.0);
-    } else if (kind == 4.0) {                               // iron lattice: diagonal bars, see-through, lights (v_col)
-        vec3 lightC = alb;
-        alb = vec3(0.045, 0.045, 0.06);
-        vec2 lq = fq / 420.0;
+    } else if (kind == 4.0) {
+        // Eiffel lattice panel: v_col.xy = this panel's (u across -1..1, v up 0..1). Its borders and the X bracing
+        // light up blue at a constant ~1.5 px (crisp at any distance), warm lamps glow inside the dark iron.
+        vec2 uv = v_col.xy;
+        vec2 fw = max(fwidth(uv), vec2(1e-5));
+        float du = (1.0 - abs(uv.x)) / fw.x;
+        float dv = min(uv.y, 1.0 - uv.y) / fw.y;
+        float xs = abs(abs(uv.x) - abs(2.0 * uv.y - 1.0));
+        float dx = xs / max(length(vec2(fw.x, 2.0 * fw.y)), 1e-5);
+        float lineB = 1.0 - smoothstep(0.5, 1.3, min(du, dv));
+        float lineX = 1.0 - smoothstep(0.35, 1.0, dx);
+        alb = vec3(0.035, 0.035, 0.05);
+        float warm = 0.10 + 0.08 * vnoise(v_pos.xy / 260.0 + v_pos.z / 210.0);
+        // fine inner lattice (only up close): a small diagonal grid, a little brighter where the lamps are
+        vec2 lq = fq / 150.0;
         float fwl = max(length(fwidth(lq)), 1e-4);
         vec2 dg = abs(fract(vec2(lq.x + lq.y, lq.x - lq.y) * 0.5) - 0.5);
-        float bar = min(dg.x, dg.y);
-        if (fwl < 0.3) {
-            if (bar > 0.10 + fwl * 0.6) discard;             // the holes between the bars
-        } else if (((int(gl_FragCoord.x) + int(gl_FragCoord.y)) & 1) == 0) {
-            discard;                                         // too far for bars: ~half see-through (MSAA-averaged)
-        }
-        // warm floodlight on the iron, a string of bulbs along the bars, sparkles every few seconds
-        vec2 bulb = abs(fract(lq * 2.0) - 0.5);
-        float bl = (1.0 - smoothstep(0.08, 0.16 + fwl, max(bulb.x, bulb.y))) * (1.0 - smoothstep(0.3, 0.8, fwl));
-        float spark = step(0.97, hash1(floor(lq * 2.0) + floor(time * 1.5))) * (1.0 - smoothstep(0.2, 0.6, fwl));
-        emis += lightC * (0.10 + 0.9 * bl + 3.0 * spark);
-    } else if (kind == 5.0) {                               // metal: reflective panels
-        spec = 0.6;
-        alb *= 0.9 + 0.2 * hash1(floor(fq / 400.0));
-        emis += sky_color(reflect(-V, n)) * 0.25;
-    } else if (kind == 7.0) {                               // neon strip
-        vec3 e = alb * em * (0.85 + 0.15 * sin(time * 2.0 + (v_pos.x + v_pos.y) / 900.0));
-        f_color = vec4(to_srgb(mix(e, hz, hk * 0.3)), 1.0);
-        return;
+        float bar = (1.0 - smoothstep(0.06, 0.06 + fwl, min(dg.x, dg.y))) * (1.0 - smoothstep(0.3, 0.8, fwl));
+        float spark = step(0.985, hash1(floor(uv * 6.0) + floor(fq / 900.0) * 3.1 + floor(time * 1.2))) * (1.0 - smoothstep(0.2, 0.6, fwl));
+        emis += vec3(1.0, 0.72, 0.38) * warm + vec3(0.25, 0.35, 0.6) * 0.10 * bar;
+        emis += vec3(0.10, 0.34, 1.0) * 1.25 * max(lineB, lineX * 0.75) + vec3(0.8, 0.9, 1.0) * 1.6 * spark;
+    } else if (kind == 15.0) {
+        // spaceship hull: plates with dark seams, some plates carry a thin strip of cool light
+        vec2 hq = vec2(fq.x / 620.0, fq.y / 240.0);
+        float fwh = max(length(fwidth(hq)), 1e-4);
+        vec2 hf = fract(hq);
+        float seam = 1.0 - smoothstep(0.0, 0.03 + fwh, min(min(hf.x, 1.0 - hf.x) * 2.6, min(hf.y, 1.0 - hf.y)));
+        float h_ = hash1(floor(hq) + 3.7);
+        alb *= (0.82 + 0.3 * h_) * (1.0 - 0.45 * seam * (1.0 - smoothstep(0.3, 0.8, fwh)));
+        float strip = step(abs(n.z) > 0.8 ? 0.93 : 0.55, h_)                          // decks: only a few
+                    * (1.0 - smoothstep(0.03, 0.03 + fwh, abs(hf.y - 0.5))) * step(0.12, hf.x) * step(hf.x, 0.88);
+        emis += vec3(0.65, 0.88, 1.0) * strip * 1.3 * (1.0 - smoothstep(0.35, 1.0, fwh));
+        emis += vec3(0.65, 0.88, 1.0) * 0.06 * step(0.55, h_) * smoothstep(0.35, 1.0, fwh);    // far: a faint average
+        spec = 0.3;
+    } else if (kind == 12.0) {
+        // glazed roof tiles: rows along the slope with ridges between the columns and a dark gutter per row
+        vec2 rq = vec2(fq.x / 48.0, v_pos.z / 42.0);
+        float fwr = max(length(fwidth(rq)), 1e-4);
+        float ridge = abs(fract(rq.x) - 0.5) * 2.0;
+        float row = fract(rq.y);
+        float tile = (0.82 + 0.25 * (1.0 - ridge * ridge)) * (0.78 + 0.22 * smoothstep(0.0, 0.25, row));
+        alb *= mix(1.0, tile, 1.0 - smoothstep(0.35, 0.9, fwr));
+        spec = 0.35;
+    } else if (kind == 13.0) {
+        // temple walls: red lacquered timber -- dark posts every 380 uu, rails every 300 uu, a golden lattice
+        // window in the upper half of every bay
+        vec2 wq = vec2(fq.x / 380.0, v_pos.z / 300.0);
+        vec2 fwq = max(fwidth(wq), vec2(1e-4));
+        float det = 1.0 - smoothstep(0.25, 0.7, max(fwq.x, fwq.y));
+        vec2 fr = fract(wq);
+        float post = 1.0 - smoothstep(0.05, 0.05 + fwq.x, min(fr.x, 1.0 - fr.x));
+        float rail = 1.0 - smoothstep(0.04, 0.04 + fwq.y, min(fr.y, 1.0 - fr.y));
+        float frame = max(post, rail);
+        float win = step(0.18, fr.x) * step(fr.x, 0.82) * step(0.45, fr.y) * step(fr.y, 0.85);
+        vec2 lat = abs(fract(fq / vec2(40.0, 40.0)) - 0.5);
+        float latt = win * (1.0 - smoothstep(0.10, 0.10 + fwq.x * 9.0, min(lat.x, lat.y)));
+        alb = mix(alb, alb * 0.45, frame * det);
+        alb = mix(alb, vec3(0.30, 0.18, 0.08), win * (1.0 - frame) * det * 0.7);
+        emis += vec3(1.0, 0.62, 0.28) * (win * 0.35 + latt * 0.5) * (1.0 - frame) * det;
     }
+    if (kind == 14.0) em = 0.0;                           // (the emission channel carried the bob phase)
     if (kind == 6.0) alb *= 0.85 + 0.3 * hash1(floor(v_pos.xy / 120.0 + v_pos.z / 90.0));
     if (kind == 8.0) {
         // karst limestone: vertical streaks; vegetation patches from a noise field (NOT per face -- that showed

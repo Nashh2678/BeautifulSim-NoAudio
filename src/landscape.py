@@ -107,20 +107,25 @@ def _rock(tris, cx, cy, cz, r, rnd):
 
 
 def _peak(tris, cx, cy, base_z, radius, height, rnd, sides=None):
-    """One faceted mountain: a jittered pyramid with 2 intermediate rings (-> ridges and shoulders).
-    uv.x on rock faces carries the height fraction (0 foot .. 1 summit) for the snow line."""
-    sides = sides or int(rnd.integers(6, 9))
+    """One mountain: 16-22 sides, 7 rings, ridges from a smooth angular noise (spurs and gullies) and a jittered
+    summit. uv.x on rock faces carries the height fraction (0 foot .. 1 summit) for the snow line."""
+    sides = sides or int(rnd.integers(16, 23))
     rot = rnd.uniform(0, 2 * math.pi)
-    rings = [(1.0, 0.0), (0.62, 0.45), (0.28, 0.80)]
+    waves = [(rnd.integers(2, 6), rnd.uniform(0, 6.3), rnd.uniform(0.08, 0.18)) for _ in range(3)]
+
+    def ridge(a):
+        return 1.0 + sum(amp * math.sin(k * a + ph) for k, ph, amp in waves)
+    rings = [(1.0, 0.0), (0.86, 0.14), (0.70, 0.30), (0.54, 0.47), (0.39, 0.63), (0.25, 0.78), (0.12, 0.91)]
     pts = []
     for k, (rf, hf) in enumerate(rings):
         row = []
         for i in range(sides):
-            a = rot + 2 * math.pi * (i + 0.5 * k) / sides + rnd.uniform(-0.18, 0.18)
-            rr = radius * rf * rnd.uniform(0.75, 1.15)
-            row.append((cx + rr * math.cos(a), cy + rr * math.sin(a), base_z + height * hf * rnd.uniform(0.9, 1.1)))
+            a = rot + 2 * math.pi * (i + 0.5 * (k % 2)) / sides + rnd.uniform(-0.06, 0.06)
+            rr = radius * rf * ridge(a) * rnd.uniform(0.94, 1.06)
+            row.append((cx + rr * math.cos(a), cy + rr * math.sin(a),
+                        base_z + height * hf * (0.92 + 0.16 * ridge(a + 1.0) * 0.5) * rnd.uniform(0.97, 1.03)))
         pts.append(row)
-    top = (cx + rnd.uniform(-0.08, 0.08) * radius, cy + rnd.uniform(-0.08, 0.08) * radius, base_z + height)
+    top = (cx + rnd.uniform(-0.05, 0.05) * radius, cy + rnd.uniform(-0.05, 0.05) * radius, base_z + height)
 
     def f(a, b, c):
         hf = (a[2] + b[2] + c[2]) / 3.0 - base_z
@@ -211,7 +216,7 @@ def build(seed=3):
 
     # trees on the low grass ring: pines + round-canopy deciduous (autumn palette)
     placed = 0
-    while placed < 300:
+    while placed < 420:
         r = rnd.uniform(PLAZA_R + 700.0, 21000.0)
         th = rnd.uniform(0, 2 * math.pi)
         x, y = r * math.cos(th), r * math.sin(th)
@@ -219,12 +224,12 @@ def build(seed=3):
         if z > 700.0 or in_lake(x, y):
             continue
         if rnd.random() < 0.35:                                                   # deciduous
-            h = rnd.uniform(420.0, 700.0) * (1.0 + 0.5 * (r - PLAZA_R) / 12000.0)
+            h = rnd.uniform(700.0, 1150.0) * (1.0 + 0.5 * (r - PLAZA_R) / 12000.0)
             _cone(tris, x, y, z - 30.0, z + h * 0.55, h * 0.06, 5, 4, rnd, 0.0)    # trunk
             _blob(tris, x, y, z + h * 0.62, h * 0.36, rnd)
             placed += 1
             continue
-        h = rnd.uniform(520.0, 950.0) * (1.0 + 0.6 * (r - PLAZA_R) / 12000.0)
+        h = rnd.uniform(900.0, 1650.0) * (1.0 + 0.6 * (r - PLAZA_R) / 12000.0)
         w = h * rnd.uniform(0.26, 0.34)
         rot = rnd.uniform(0, math.pi)
         z0 = z - 30.0
@@ -235,7 +240,7 @@ def build(seed=3):
     return np.asarray(tris, "f4")
 
 
-MESH_VERSION = 4
+MESH_VERSION = 5
 
 
 def load_or_build(cache_path):

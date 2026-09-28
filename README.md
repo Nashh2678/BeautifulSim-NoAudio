@@ -82,11 +82,12 @@ there are git-ignored, so they never get committed by accident.
 
 ## Features
 
-- **Maps** (arrow keys, remembered): the evening valley below; a Forbidden Temple-style pink dusk with karst
+- **Maps** (arrow keys, remembered): the evening valley below (with a lakeside village, a castle, a windmill and
+  hot-air balloons); a Forbidden Temple-style pink dusk with karst
   peaks, pagodas, a paifang gate, cherry trees and lanterns; a Parc de Paris-style violet evening with two curved blue / orange stands under
   sweeping floodlit roofs, a formal garden with a golden-sphere fountain and graffiti, and the Eiffel Tower lit in blue
-  down the Champ de Mars; and an orbital platform in space (stars of many shades, the Milky Way, a ringed gas giant,
-  moons, the planet below, asteroids, a station; no crowd). Each has its own
+  down the Champ de Mars; and a star cruiser in orbit, the arena on its top deck (stars of many shades, the Milky Way,
+  a ringed gas giant, a moon, the planet below, an asteroid belt, a station; no crowd). Each has its own
   sky, light and field style, and a crowd of eggs that jumps on its seats after goals and saves (a save = a
   defender's touch on a ball that was going in).
 - **Arena**: see-through hexagon walls and ceiling, a grass pitch with Rocket League-style team markings (striped
