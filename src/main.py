@@ -439,6 +439,8 @@ class RSVRenderer:
         self.prog_sky["cloudB"].value = tuple(th["cloudB"])
         self.prog_sky["starK"].value = float(th.get("stars", 0.0))
         self.prog_sky["cloudShape"].value = tuple(th.get("cloud_shape", (1.9, 1.9)))
+        if name == "space" and self._space_cube is None:
+            self._bake_space_sky()
         if name in rl_maps.BUILDERS and name not in self._scenes:
             mesh, crowd = rl_maps.load_or_build(name, DATA_DIR_PATH)
             vao = self.ctx.vertex_array(self.prog_scene, [(self.ctx.buffer(mesh.tobytes()), "3f 3f 2f",
@@ -483,6 +485,70 @@ class RSVRenderer:
             self.ctx.enable_direct(0x809E)                 # GL_SAMPLE_ALPHA_TO_COVERAGE: smooth egg edges
             cvao.render(moderngl.TRIANGLES, instances=n_eggs)
             self.ctx.disable_direct(0x809E)
+
+    def _bake_blades(self):
+        """The grass blade pattern -> a repeating, mipmapped R8 texture (texture unit 5) read by the arena shader."""
+        prog = self.ctx.program(vertex_shader=rl_shaders.SKY_VERT, fragment_shader=rl_shaders.BLADE_FRAG)
+        tex = self.ctx.texture((2048, 2048), 1, dtype="f1")
+        fbo = self.ctx.framebuffer(color_attachments=[tex])
+        fbo.use()
+        self.ctx.viewport = (0, 0, 2048, 2048)
+        self.ctx.vertex_array(prog, []).render(moderngl.TRIANGLES, vertices=3)
+        tex.build_mipmaps()
+        tex.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+        tex.repeat_x = tex.repeat_y = True
+        try:
+            tex.anisotropy = 8.0
+        except Exception:
+            pass
+        self._blade_tex = tex
+        self.prog_rl_arena["bladeTex"].value = 5
+        # the turf grain, the same way (texture unit 7)
+        prog = self.ctx.program(vertex_shader=rl_shaders.SKY_VERT, fragment_shader=rl_shaders.GRAIN_FRAG)
+        tex = self.ctx.texture((2048, 2048), 1, dtype="f1")
+        fbo = self.ctx.framebuffer(color_attachments=[tex])
+        fbo.use()
+        self.ctx.vertex_array(prog, []).render(moderngl.TRIANGLES, vertices=3)
+        tex.build_mipmaps()
+        tex.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+        tex.repeat_x = tex.repeat_y = True
+        try:
+            tex.anisotropy = 8.0
+        except Exception:
+            pass
+        self._grain_tex = tex
+        self.prog_rl_arena["grainTex"].value = 7
+
+    SPACE_CUBE_N = 1024
+
+    def _bake_space_sky(self):
+        """The static part of the Orbit sky (spaceStatic) -> a cube map, once: the sky pass then only adds the stars
+        and the sun (it was ~1.4 ms per frame on the iGPU)."""
+        N = self.SPACE_CUBE_N
+        tex2d = self.ctx.texture((N, N), 4, dtype="f1")
+        fbo = self.ctx.framebuffer(color_attachments=[tex2d])
+        cube = self.ctx.texture_cube((N, N), 4, dtype="f1")
+        ps = self.prog_sky
+        ps["bakeN"].value = float(N)
+        ps["time"].value = 0.0
+        self.ctx.disable(moderngl.DEPTH_TEST)
+        self.ctx.disable(moderngl.BLEND)
+        for face in range(6):
+            fbo.use()
+            self.ctx.viewport = (0, 0, N, N)
+            ps["skyBake"].value = face
+            self.sky_vao.render(moderngl.TRIANGLES, vertices=3)
+            cube.write(face, fbo.read(components=4, alignment=1))
+        ps["skyBake"].value = -1
+        self.ctx.enable(moderngl.DEPTH_TEST)
+        self.ctx.enable(moderngl.BLEND)
+        cube.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        try:
+            self.ctx.enable_direct(0x884F)                  # GL_TEXTURE_CUBE_MAP_SEAMLESS
+        except Exception:
+            pass
+        fbo.release(); tex2d.release()
+        self._space_cube = cube
 
     def _render_pad_ghosts(self, vp_bytes, cam_bytes):
         """The returning orbs of recharging pads. Translucent, so drawn AFTER the sky: drawn with the pads, the sky
@@ -733,6 +799,10 @@ class RSVRenderer:
         self.prog_ball = self.ctx.program(vertex_shader=rl_shaders.BALL_VERT, fragment_shader=rl_shaders.BALL_FRAG)
         self.prog_sky = self.ctx.program(vertex_shader=rl_shaders.SKY_VERT, fragment_shader=rl_shaders.SKY_FRAG)
         self.sky_vao = self.ctx.vertex_array(self.prog_sky, [])
+        self.prog_sky["skyBake"].value = -1
+        self.prog_sky["spaceCube"].value = 6
+        self._space_cube = None
+        self._bake_blades()
         # low-poly valley around the arena (landscape.py); the built mesh is cached next to the data
         self.prog_stadium = self.ctx.program(vertex_shader=rl_shaders.LANDSCAPE_VERT, fragment_shader=rl_shaders.LANDSCAPE_FRAG)
         st_mesh = landscape.load_or_build(os.path.join(DATA_DIR_PATH, "landscape_cache.npy"))
@@ -2436,6 +2506,10 @@ class RSVRenderer:
         self.render_target.use()
         self.prog_rl_arena["detailBias"].value = 2.0 if self.config.gfx_detail == "sharp" else 1.0
         self.prog_rl_arena["passMode"].value = 0
+        self._blade_tex.use(location=5)
+        self._grain_tex.use(location=7)
+        if self._space_cube is not None:
+            self._space_cube.use(location=6)
         if "arena" not in _SKIP:
             self.vaos['ArenaMeshCustom.obj'].render(moderngl.TRIANGLES)
         # Draw order is for overdraw: everything opaque first, so the depth test rejects the hidden
@@ -2657,6 +2731,10 @@ class RSVRenderer:
         local = car == spectated and car >= 0
         sfx = "_local" if local else "_other"
         stall = bool(ev.get("stall"))              # a stall: flip input, no impulse and no rotation
+        if k in ("jump", "doublejump") and car >= 0:
+            # a jump that is not a flip (e.g. right after a wavedash, even before the landing was seen) ends any
+            # flip streaks still pending for that car
+            self._flip_until[car] = 0.0
         if k == "dodge" and car >= 0 and not stall:
             self._flip_until[car] = time.time() + self.FLIP_STREAK_EMIT
             self.__dict__.setdefault("_flip_airseen", {})[car] = False
@@ -3063,6 +3141,7 @@ def main():
     import socket as _socket
     _focus_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
     _was_active = [False]
+    _active_t = [time.monotonic()]
 
     _side_next = [0.0]
     _fps_applied = [None]
@@ -3088,6 +3167,8 @@ def main():
             pass
         _was_active[0] = active
         now_ = time.monotonic()
+        if active:
+            _active_t[0] = now_
         if now_ < _side_next[0]:
             return                       # clip poll + focus heartbeat at ~30 Hz, not every frame
         _side_next[0] = now_ + 0.03
@@ -3099,7 +3180,11 @@ def main():
             pass
         # Report focus to a PLAY driver (if any) so it can HOLD playback while we're hidden.
         try:
-            _focus_sock.sendto(b"1" if active else b"0", ("127.0.0.1", 9275))
+            # "0" (pause the feed) only after 0.25 s unfocused in a row: while the window comes back to the front
+            # Windows reports it as inactive for a few frames, and pausing the feed for each of those flickers
+            # played the first moments after a tab-back in slow motion
+            held = active or now_ - _active_t[0] < 0.25
+            _focus_sock.sendto(b"1" if held else b"0", ("127.0.0.1", 9275))
         except Exception:
             pass
 

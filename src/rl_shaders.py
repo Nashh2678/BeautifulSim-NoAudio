@@ -90,6 +90,8 @@ uniform float detailBias;      // 1 = smooth distant detail, 2 = "sharp" (detail
 uniform vec4 ballMark;         // RL ball marker: ball x, y, centre z, height factor 0..1 (< 0 = off)
 uniform int mapId;             // 0 valley, 1 Forbidden Temple, 2 Parc de Paris, 3 Orbit (maps.py)
 uniform vec3 grassCol;         // the turf's base colour on this map
+uniform sampler2D bladeTex;    // the blade pattern (BLADE_FRAG), 16 texels per blade cell, 128 cells, repeating
+uniform sampler2D grainTex;    // the turf grain (GRAIN_FRAG), repeating every 768 uu
 uniform float glassK;          // wall / ceiling glass opacity factor (1 = valley)
 
 // Greek-key (meander) tile, 5x5 cells, row 0 at the bottom (Forbidden Temple's centre band)
@@ -210,28 +212,9 @@ void main() {
             float pxb = mix(px, sqrt(max(length(dFdx(q)) * length(dFdy(q)), 1e-6)) / max(detailBias, 1.0), 0.5);
             float fineW = 1.0 - smoothstep(0.7, 4.5, pxb);
             if (fineW > 0.0 && mapId != 3) {                 // (Orbit: a metal floor, no blades)
-                float blades = 0.0;
-                for (int L = 0; L < 2; L++) {
-                    float cs = L == 0 ? 3.2 : 2.1;
-                    vec2 qq = (L == 0 ? q : mat2(0.8, -0.6, 0.6, 0.8) * q + 11.0) / cs;
-                    vec2 cid = floor(qq), f = fract(qq);
-                    float best = 0.0;
-                    for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {
-                        vec2 c = cid + vec2(i, j);
-                        float h1 = hash1(c), h2 = hash1(c + 31.7), h3 = hash1(c + 57.1);
-                        vec2 root = vec2(i, j) + vec2(h1, h2);
-                        float ang = h3 * 6.2832;
-                        vec2 dir = vec2(cos(ang), sin(ang));
-                        float len = 0.9 + 0.8 * hash1(c + 91.3);
-                        vec2 d = f - root;
-                        float along = clamp(dot(d, dir), 0.0, len);
-                        float dist = length(d - dir * along);
-                        float w = 0.10 * (1.0 - 0.7 * along / len);                    // tapers to the tip
-                        float blade = (1.0 - smoothstep(w, w + 0.06, dist)) * (0.35 + 0.65 * along / len);
-                        best = max(best, blade * (0.6 + 0.4 * hash1(c + 7.7)));
-                    }
-                    blades += best * (L == 0 ? 0.6 : 0.4);
-                }
+                // the same two blade layers as before, read from the baked pattern (was 18 cells evaluated per pixel)
+                float blades = texture(bladeTex, q / (3.2 * 128.0)).r * 0.6
+                             + texture(bladeTex, (mat2(0.8, -0.6, 0.6, 0.8) * q + 11.0) / (2.1 * 128.0)).r * 0.4;
                 vec3 dark = col * 0.62, lit = col * 1.30 + vec3(0.02, 0.03, 0.0);
                 col = mix(col, mix(dark, lit, clamp(blades * 1.4, 0.0, 1.0)), fineW);
             }
@@ -242,14 +225,9 @@ void main() {
             // axis: at the grazing angles of a pitch the longest axis is many times the short one, and
             // using it smeared the turf flat a few car lengths away (poor man's anisotropic filtering).
             float pxa = sqrt(max(length(dFdx(q)) * length(dFdy(q)), 1e-6)) / max(detailBias, 1.0);
-            float grain = 0.0;
-            float sc = 6.0;
-            mat2 rot = mat2(0.8, -0.6, 0.6, 0.8);
-            vec2 qo = q;
-            for (int k = 0; k < 4; k++) {          // 6, 12, 24, 48 uu octaves, each kept until ~1.5 px
-                grain += (vnoise(qo / sc) - 0.5) * smoothstep(1.5, 4.0, sc / pxa) * (k == 0 ? 0.6 : 1.0);
-                sc *= 2.0; qo = rot * qo + 17.3;
-            }
+            // 6, 12, 24, 48 uu value-noise octaves, baked (GRAIN_FRAG); the mipmaps fade each octave out as it
+            // gets smaller than a few pixels (it was 16 noise evaluations per pixel)
+            float grain = (texture(grainTex, q / 768.0).r - 0.5) * 4.0;
             col *= 1.0 + 0.13 * grain * (1.0 - 0.6 * fineW);
             // gentle per-metre value noise so even the averaged far field isn't perfectly flat
             col *= 0.95 + 0.10 * vnoise(q / 40.0);
@@ -654,6 +632,9 @@ uniform vec4 cloudA;       // cloud colour lit (rgb), coverage threshold (a: low
 uniform vec4 cloudB;       // cloud colour shadowed (rgb), opacity (a)
 uniform float starK;       // faint stars in the darker upper sky (dusk maps)
 uniform vec2 cloudShape;   // cloud noise scale along x / y (equal = puffy, very unequal = long wisps)
+uniform samplerCube spaceCube;   // the baked static space sky (spaceStatic) + open-sky mask in alpha
+uniform int skyBake;       // >= 0: bake face skyBake (0..5 = +X -X +Y -Y +Z -Z) of spaceStatic; -1 = normal
+uniform float bakeN;       // cube face size in texels
 in vec2 v_ndc;
 out vec4 f_color;
 
@@ -717,26 +698,21 @@ vec3 stars(vec3 d, float scale, float prob, float seed) {
     vec2 fw = fwidth(p);
     float px = max(max(fw.x, fw.y), 1e-4);                     // cells per pixel
     if (px > 0.6) return vec3(0.0);                             // (a face seam in this pixel quad)
-    vec2 cell = floor(p);
+    // one cell only: the star's centre stays in the middle 40% of its cell, so with cells of >= ~6 px it is never
+    // cut by a cell edge (the 3x3 neighbour search cost 9x as much)
+    vec2 c = floor(p);
     float fs = seed + face * 131.0;
-    vec3 acc = vec3(0.0);
-    for (int j = -1; j <= 1; j++) {
-        for (int i = -1; i <= 1; i++) {
-            vec2 c = cell + vec2(float(i), float(j));
-            float h = hash1(c + fs);
-            if (h > prob) continue;
-            h /= prob;
-            vec2 ctr = c + 0.5 + (vec2(hash1(c + fs + 1.7), hash1(c + fs + 4.1)) - 0.5) * 0.7;
-            float dpx = length(p - ctr) / px;
-            float size = 0.75 + 1.0 * pow(hash1(c + fs + 9.2), 5.0);
-            float b = 0.30 + 1.5 * pow(hash1(c + fs + 2.2), 3.0);
-            b *= 0.9 + 0.1 * sin(time * (1.1 + 2.0 * h) + h * 40.0);
-            float core = 1.0 - smoothstep(size * 0.45, size, dpx);
-            float halo = exp(-dpx * dpx / (size * size * 2.5)) * 0.10;
-            acc += starTint(h) * b * (core + halo);
-        }
-    }
-    return acc;
+    float h = hash1(c + fs);
+    if (h > prob) return vec3(0.0);
+    h /= prob;
+    vec2 ctr = c + 0.5 + (vec2(hash1(c + fs + 1.7), hash1(c + fs + 4.1)) - 0.5) * 0.4;
+    float dpx = length(p - ctr) / px;
+    float size = 0.75 + 1.0 * pow(hash1(c + fs + 9.2), 5.0);
+    float b = 0.30 + 1.5 * pow(hash1(c + fs + 2.2), 3.0);
+    b *= 0.9 + 0.1 * sin(time * (1.1 + 2.0 * h) + h * 40.0);
+    float core = 1.0 - smoothstep(size * 0.45, size, dpx);
+    float halo = exp(-dpx * dpx / (size * size * 2.5)) * 0.10;
+    return starTint(h) * b * (core + halo);
 }
 
 // a sphere in the sky seen from the arena: direction P, angular radius R -> coverage (a) and its normal
@@ -755,7 +731,10 @@ vec4 skySphere(vec3 d, vec3 P, float R, out vec3 nrm) {
     return vec4(1.0, 1.0, 1.0, edge);
 }
 
-vec3 spaceSky(vec3 d) {
+// Everything in the space sky that does not move (Milky Way, nebula, gas giant + ring, moon, the planet below),
+// baked once into a cube map (RSVRenderer._bake_space_sky); `open` = how much of the star field shows through.
+vec3 spaceStatic(vec3 d, out float open) {
+    open = 1.0;
     vec3 c = vec3(0.003, 0.004, 0.010);
     // Milky Way: a band along a great circle, dusty and mottled, with darker lanes
     vec3 N = normalize(vec3(0.35, -0.45, 0.82));
@@ -774,11 +753,6 @@ vec3 spaceSky(vec3 d) {
     float nm = fbm3(d.xy * 5.0 + d.z * 3.0) * fbm3(d.yz * 3.0 + 9.0);
     c += (vec3(0.28, 0.06, 0.26) * nm + vec3(0.03, 0.14, 0.20) * (1.0 - nm) * 0.4) * pow(nd, 7.0) * 0.8;
     c = max(c, vec3(0.0));
-    c += stars(d, 50.0, 0.028, 0.0) * 1.2;                                              // clear ones
-    c += stars(d, 95.0, 0.010 + 0.03 * min(band, 1.0), 17.0) * 0.5;                     // dimmer, more in the band
-    // the star lighting the scene: a hot disc with a wide glare
-    float sd = max(dot(d, SUN_DIR), 0.0);
-    c += vec3(1.0, 0.97, 0.9) * (smoothstep(0.99955, 0.9997, sd) * 12.0 + pow(sd, 400.0) * 1.5 + pow(sd, 24.0) * 0.08);
 
     // ringed gas giant
     vec3 GP = normalize(vec3(-0.55, 0.62, 0.42));
@@ -799,6 +773,7 @@ vec3 spaceSky(vec3 d) {
     }
     bool ringFront = tR < dot(d, GP);                       // the ring crossing is nearer than the planet centre
     if (!ringFront) c = mix(c, ringC, ringA);
+    open *= (1.0 - ringA) * (1.0 - g.a);
     if (g.a > 0.0) {
         float lat = dot(gn, GA);
         float bands = fbm3(vec2(lat * 9.0, lat * 2.0 + fbm3(vec2(lat * 30.0, dot(gn, cross(GA, GP)) * 3.0)) * 0.6));
@@ -813,6 +788,7 @@ vec3 spaceSky(vec3 d) {
     // two moons
     vec3 mn;
     vec4 m1 = skySphere(d, normalize(vec3(0.72, 0.30, 0.38)), 0.05, mn);
+    open *= 1.0 - m1.a;
     if (m1.a > 0.0) {
         float cr = fbm3(mn.xy * 9.0 + mn.z * 4.0);
         c = mix(c, vec3(0.55, 0.54, 0.52) * (0.7 + 0.5 * cr) * (0.02 + max(dot(mn, SUN_DIR), 0.0)), m1.a);
@@ -829,15 +805,39 @@ vec3 spaceSky(vec3 d) {
         float lit = 0.15 + 0.85 * max(dot(pn, SUN_DIR) * 0.8 + 0.2, 0.0);
         vec3 pc = mix(vec3(0.25, 0.5, 1.0) * 0.8, surf * lit, smoothstep(0.0, 0.25, k));   // atmosphere at the limb
         c = mix(c, pc, smoothstep(0.0, 0.02, k));
+        open *= 1.0 - smoothstep(0.0, 0.02, k);
     }
     c += vec3(0.15, 0.35, 0.8) * exp(-pow((d.z + 0.28) / 0.03, 2.0)) * 0.5;                    // limb glow
     return c;
+}
+
+// The live space sky: the baked cube map + the stars (twinkling, pixel-sized) and the sun on top, where open.
+vec3 spaceSky(vec3 d) {
+    vec4 bk = texture(spaceCube, d);
+    vec3 y = pow(bk.rgb, vec3(2.2));
+    vec3 c = y / max(1.0 - 0.15 * y, 0.05);                     // undo to_srgb (8-bit sRGB storage: no banding)
+    float bd = dot(d, normalize(vec3(0.35, -0.45, 0.82)));
+    float band = exp(-bd * bd / 0.035) * 0.9;
+    vec3 st = stars(d, 50.0, 0.028, 0.0) * 1.2 + stars(d, 95.0, 0.010 + 0.03 * min(band, 1.0), 17.0) * 0.5;
+    float sd = max(dot(d, SUN_DIR), 0.0);
+    st += vec3(1.0, 0.97, 0.9) * (smoothstep(0.99955, 0.9997, sd) * 12.0 + pow(sd, 400.0) * 1.5 + pow(sd, 24.0) * 0.08);
+    return c + st * bk.a;
 }
 
 void main() {
     vec4 a = invVP * vec4(v_ndc, -1.0, 1.0);
     vec4 b = invVP * vec4(v_ndc, 1.0, 1.0);
     vec3 d = normalize(b.xyz / b.w - a.xyz / a.w);
+    if (skyBake >= 0) {
+        vec2 st_ = gl_FragCoord.xy / bakeN * 2.0 - 1.0;          // GL cube map face conventions
+        vec3 fd = skyBake == 0 ? vec3(1.0, -st_.y, -st_.x) : skyBake == 1 ? vec3(-1.0, -st_.y, st_.x)
+                : skyBake == 2 ? vec3(st_.x, 1.0, st_.y) : skyBake == 3 ? vec3(st_.x, -1.0, -st_.y)
+                : skyBake == 4 ? vec3(st_.x, -st_.y, 1.0) : vec3(-st_.x, -st_.y, -1.0);
+        float open;
+        vec3 c = spaceStatic(normalize(fd), open);
+        f_color = vec4(to_srgb(c), open);
+        return;
+    }
     if (mapId == 3) {
         f_color = vec4(to_srgb(spaceSky(d)), 1.0);
         return;
@@ -1126,8 +1126,8 @@ void main() {
     // haze: blend toward the sky colour in the view direction (mountains fade into the dusk)
     float dist = length(camPos - v_pos);
     vec3 dir = normalize(v_pos - camPos);
-    vec3 haze = sky_color(vec3(dir.xy, max(dir.z, 0.02)));
-    c = mix(c, haze, smoothstep(9000.0, 48000.0, dist) * 0.85);
+    float hk = smoothstep(9000.0, 48000.0, dist) * 0.85;
+    if (hk > 0.0) c = mix(c, sky_color(vec3(dir.xy, max(dir.z, 0.02))), hk);
     f_color = vec4(to_srgb(c), 1.0);
 }
 '''
@@ -1361,8 +1361,8 @@ void main() {
     float spec = 0.0;
     float dist = length(camPos - v_pos);
     vec3 dir = -V;
-    vec3 hz = sky_color(vec3(dir.xy, max(dir.z, 0.02)));
     float hk = smoothstep(haze.x, haze.y, dist) * haze.z;
+    vec3 hz = hk > 0.0 ? sky_color(vec3(dir.xy, max(dir.z, 0.02))) : vec3(0.0);
     // face coordinates for the patterns: horizontal position along the wall + height
     vec2 fq = abs(n.z) > 0.8 ? v_pos.xy : (abs(n.x) > abs(n.y) ? vec2(v_pos.y, v_pos.z) : vec2(v_pos.x, v_pos.z));
     if (kind == 1.0) {                                      // water: sky reflection with fresnel, soft ripples
@@ -1623,7 +1623,62 @@ void main() {
     c += v_col * 0.25 * pow(1.0 - nl.z, 3.0);                                        // soft rim
     float dist = length(camPos - v_pos);
     vec3 dir = -V;
-    c = mix(c, sky_color(vec3(dir.xy, max(dir.z, 0.02))), smoothstep(haze.x, haze.y, dist) * haze.z);
+    float hk = smoothstep(haze.x, haze.y, dist) * haze.z;
+    if (hk > 0.0) c = mix(c, sky_color(vec3(dir.xy, max(dir.z, 0.02))), hk);
     f_color = vec4(to_srgb(c), cov);
+}
+'''
+
+
+# The grass blade pattern, baked once into a repeating texture (128 x 128 cells, 16 texels per cell): individual
+# strands as short, randomly oriented blades, darker at the root and bright at the tip (value = the brightest blade
+# covering the texel). The arena shader reads it for its two blade layers.
+BLADE_FRAG = '''
+#version 330
+float hash1(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+out vec4 f_color;
+void main() {
+    const float N = 128.0;
+    vec2 qq = gl_FragCoord.xy / 16.0;
+    vec2 cid = floor(qq), f = fract(qq);
+    float best = 0.0;
+    for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {
+        vec2 c = mod(cid + vec2(i, j), N);
+        float h1 = hash1(c), h2 = hash1(c + 31.7), h3 = hash1(c + 57.1);
+        vec2 root = vec2(i, j) + vec2(h1, h2);
+        float ang = h3 * 6.2832;
+        vec2 dir = vec2(cos(ang), sin(ang));
+        float len = 0.9 + 0.8 * hash1(c + 91.3);
+        vec2 d = f - root;
+        float along = clamp(dot(d, dir), 0.0, len);
+        float dist = length(d - dir * along);
+        float w = 0.10 * (1.0 - 0.7 * along / len);
+        float blade = (1.0 - smoothstep(w, w + 0.06, dist)) * (0.35 + 0.65 * along / len);
+        best = max(best, blade * (0.6 + 0.4 * hash1(c + 7.7)));
+    }
+    f_color = vec4(best, 0.0, 0.0, 1.0);
+}
+'''
+
+# The turf grain: 6, 12, 24, 48 uu value-noise octaves (weights 0.6, 1, 1, 1), periodic over 768 uu (2048 texels),
+# stored as 0.5 + grain / 4.
+GRAIN_FRAG = '''
+#version 330
+float hash1(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float pnoise(vec2 p, float L, vec2 o) {
+    vec2 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    vec2 a = mod(i, L), b = mod(i + 1.0, L);
+    return mix(mix(hash1(a + o), hash1(vec2(b.x, a.y) + o), f.x), mix(hash1(vec2(a.x, b.y) + o), hash1(b + o), f.x), f.y);
+}
+out vec4 f_color;
+void main() {
+    vec2 q = gl_FragCoord.xy * (768.0 / 2048.0);
+    float g = 0.0, sc = 6.0;
+    for (int k = 0; k < 4; k++) {
+        g += (pnoise(q / sc, 768.0 / sc, vec2(17.3 * float(k), 5.1 * float(k))) - 0.5) * (k == 0 ? 0.6 : 1.0);
+        sc *= 2.0;
+    }
+    f_color = vec4(clamp(0.5 + g * 0.25, 0.0, 1.0), 0.0, 0.0, 1.0);
 }
 '''

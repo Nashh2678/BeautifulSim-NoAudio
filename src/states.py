@@ -99,24 +99,26 @@ class PhysState:
     def is_teleporting(self):
         return self._tp
 
+    # A teleport (reset, respawn) shows the NEW state at once: showing the previous one for the packet interval put
+    # a respawning car back where it was demoed (or parked) for a fraction of a second.
     def get_pos(self, interp_ratio):
         if not self.is_teleporting():
             return self.prev_pos + (self.next_pos - self.prev_pos)*interp_ratio
         else:
-            return self.prev_pos
+            return self.next_pos
 
     def get_vel(self, interp_ratio):
         if not self.is_teleporting():
             return self.prev_vel + (self.next_vel - self.prev_vel)*interp_ratio
         else:
-            return self.prev_vel
+            return self.next_vel
 
     def get_forward(self, interp_ratio):
         if self.has_rot:
             if not self.is_teleporting():
                 return (self.prev_forward + (self.next_forward - self.prev_forward) * interp_ratio).normalized
             else:
-                return self.prev_forward
+                return self.next_forward
         else:
             return self.next_forward
 
@@ -125,7 +127,7 @@ class PhysState:
             if not self.is_teleporting():
                 return (self.prev_up + (self.next_up - self.prev_up) * interp_ratio).normalized
             else:
-                return self.prev_up
+                return self.next_up
         else:
             return self.next_up
 
@@ -203,7 +205,9 @@ class CarState:
         self.on_ground = j["on_ground"]
         if not (j.get("has_flipped_or_double_jumped") is None):
             self.has_flipped_or_double_jumped = j["has_flipped_or_double_jumped"]
-        self.is_demoed = j["is_demoed"]
+        was_demoed, self.is_demoed = self.is_demoed, bool(j["is_demoed"])
+        if was_demoed != self.is_demoed:
+            self.phys._tp = True           # demo / respawn: never interpolate between the two places
 
 # From RLGym
 default_boost_pad_locations = (

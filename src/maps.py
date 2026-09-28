@@ -19,7 +19,7 @@ import numpy as np
 ORDER = ["valley", "temple", "paris", "space"]
 MAP_ID = {k: i for i, k in enumerate(ORDER)}
 TITLE = {"valley": "Evening Valley", "temple": "Forbidden Temple", "paris": "Parc de Paris", "space": "Orbit"}
-SCENE_VERSION = 21
+SCENE_VERSION = 22
 
 
 def _n(v):
@@ -554,19 +554,6 @@ def _eiffel(g, cx, cy, H, day=False):
             panel(g, P(za, ia, ia), P(za, wa, ia), P(zb, wb, ib), P(zb, ib, ib))
     blue = (0.35, 0.62, 1.0)
     iron = (0.30, 0.22, 0.16) if day else (0.05, 0.05, 0.07)
-    # the big arches under the first floor: a lit band + a dark backing
-    for side in range(4):
-        yaw = side * math.pi / 2
-        ia = w(0.06 * H) - t(0.06 * H)
-        pa, pb = [], []
-        for k in range(21):
-            u = -1.0 + 2.0 * k / 20
-            zz = z1f - 0.02 * H - (z1f * 0.60) * (1.0 - u * u)
-            off = w(zz) - t(zz) * 0.25 + 10
-            pa.append((u * ia, off, zz + z0g)); pb.append((u * ia, off, zz + z0g + 0.006 * H))
-        A = _xf(pa, (cx, cy, 0.0), yaw); B = _xf(pb, (cx, cy, 0.0), yaw)
-        for k in range(20):
-            g.quads(A[k], A[k + 1], B[k + 1], B[k], iron if day else blue, 0.0 if day else 2.2, 0 if day else 7)
     # floors: dark decks with a warm window band and blue lit edges
     for zf_, ext in ((z1f, 0.010), (z2, 0.007)):
         hw = w(zf_) + ext * H
