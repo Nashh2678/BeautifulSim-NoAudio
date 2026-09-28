@@ -356,6 +356,7 @@ class EventDetector:
         self._pair_cool = {}
         self._reset_cool = {}
         self._body_cool = {}
+        self._touch_t = {}              # car -> last packet time it touched the ball
         self.last_touch_team = None     # team of the last car to touch the ball (ball trail colour)
         self._goal_cool_until = 0.0
         self._save_cool_until = 0.0
@@ -401,7 +402,8 @@ class EventDetector:
 
         # ---- ball ----
         dvb = _sub(bvel, pb[1])
-        dvb_mag = _len((dvb[0], dvb[1], dvb[2] + 21.7))     # remove ~1 packet of gravity
+        # remove one packet of gravity (650 uu/s^2; the feed may be 30 Hz steps or 120 Hz ticks)
+        dvb_mag = _len((dvb[0], dvb[1], dvb[2] + 650.0 * min(max(t - prev_t, 1.0 / 240.0), 1.0 / 20.0)))
         touchers = [i for i, c in enumerate(cars) if c.touched and not c.demoed]
         have_touch_flag = any(c.touched is not None for c in cars)
         if not have_touch_flag and dvb_mag > 250.0:
@@ -412,6 +414,12 @@ class EventDetector:
         if touchers:
             i = touchers[0]
             self.last_touch_team = cars[i].team
+            # a per-tick (120 Hz) feed reports a sustained contact (dribble, carry) on every tick: only a new touch,
+            # or a real hit during the contact, is an event -- a soft continuation within 30 ms is not
+            last_t, self._touch_t[i] = self._touch_t.get(i, -1.0), t
+            if t - last_t < 0.03 and dvb_mag < 250.0:
+                touchers = []
+        if touchers:
             contact, under = box_contact(cars[i], bpos)
             self._emit(t, "ball_hit", bpos, car=i, team=cars[i].team, strength=dvb_mag, contact=contact,
                        underside=under)

@@ -27,6 +27,7 @@ def parse_args():
     ap.add_argument("--no-shots", action="store_true")
     ap.add_argument("--fps-cap", type=float, default=0.0, help="0 = render as fast as possible")
     ap.add_argument("--no-finish", action="store_true", help="time CPU submission only (no GPU wait)")
+    ap.add_argument("--map", default=None, help="valley / temple / paris / space (default: the saved one)")
     return ap.parse_args()
 
 
@@ -206,6 +207,8 @@ ctx = moderngl.create_standalone_context(require=330)
 r = rsv.RSVRenderer()
 r.audio.wait_loaded()                   # sound loads on a background thread
 r.init_gl(ctx)
+if args.map:
+    r.set_map(args.map, save=False)
 screen = ctx.framebuffer(color_attachments=[ctx.texture((W, H), 4)], depth_attachment=ctx.depth_renderbuffer((W, H)))
 print("GPU:", r.gpu_name, "size", W, H, flush=True)
 
@@ -223,7 +226,7 @@ SHOTS = {1.0: "01_drive_boost", 1.3: "01b_drive_boost", 2.1: "02_dodge_hit", 3.7
 shots_left = dict(SHOTS)
 event_log = []
 
-cpu_ms, gpu_ms = [], []
+cpu_ms, gpu_ms, sim_t = [], [], []
 q = ctx.query(time=True)
 t0 = time.time()
 next_packet = t0
@@ -260,6 +263,7 @@ while True:
         ctx.finish()
     cpu_ms.append((time.perf_counter() - c0) * 1000.0)
     gpu_ms.append(q.elapsed / 1e6 if r._gpu_query is None else r._gpu_query.elapsed / 1e6)
+    sim_t.append(sc.t)
     frames += 1
     for ts in sorted(shots_left):
         if sc.t >= ts:
@@ -275,7 +279,12 @@ while True:
 cpu = np.array(cpu_ms[10:]); gpu = np.array(gpu_ms[10:])
 print("frames", frames, "avg fps", round(frames / args.seconds, 1))
 print("cpu ms/frame  mean {:.2f}  p50 {:.2f}  p95 {:.2f}  max {:.2f}".format(cpu.mean(), np.median(cpu), np.percentile(cpu, 95), cpu.max()))
-print("gpu ms/frame  mean {:.2f}  p50 {:.2f}  p95 {:.2f}".format(gpu.mean(), np.median(gpu), np.percentile(gpu, 95)))
+print("gpu ms/frame  mean {:.2f}  p50 {:.2f}  p95 {:.2f}  p99 {:.2f}  max {:.2f}".format(
+    gpu.mean(), np.median(gpu), np.percentile(gpu, 95), np.percentile(gpu, 99), gpu.max()))
+print("cpu p99 {:.2f}  frames > 2x median: {}".format(np.percentile(cpu, 99), int((cpu > 2 * np.median(cpu)).sum())))
+st_ = np.array(sim_t[10:])
+print("gpu ms by scenario second:", " ".join("{}:{:.1f}".format(s_, gpu[(st_ >= s_) & (st_ < s_ + 1)].mean())
+                                              for s_ in range(int(st_.max()) + 1) if ((st_ >= s_) & (st_ < s_ + 1)).any()))
 print("events:")
 for e in event_log:
     print("  ", e)

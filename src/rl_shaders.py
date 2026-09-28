@@ -53,6 +53,66 @@ vec3 to_srgb(vec3 c) {
 }
 '''
 
+
+# Shadow casters (ball + cars) shared by the arena floor and the 3D grass
+CASTERS = '''
+uniform vec4 casters[9];
+uniform vec2 casterFwd[9];
+uniform int nCasters;
+float sdRoundBox(vec2 p, vec2 b, float r) {
+    vec2 q = abs(p) - b + r;
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+float shadowAt(vec3 p) {
+    float sh = 0.0;
+    for (int i = 0; i < nCasters; i++) {
+        vec4 c = casters[i];
+        float h = c.z - p.z;
+        if (h < -20.0) continue;
+        vec2 d = p.xy - c.xy;
+        vec2 f = casterFwd[i];
+        if (dot(f, f) > 0.0) { vec2 fr = vec2(-f.y, f.x); d = vec2(dot(d, f) / 1.55, dot(d, fr)); }
+        float soft = 1.0 + h / 900.0;
+        float r = c.w * soft;
+        float a = 1.0 - smoothstep(r * 0.45, r, length(d));
+        sh = max(sh, a * (1.0 - smoothstep(300.0, 2600.0, h)) * (0.6 / soft));
+    }
+    return sh;
+}
+// Contact occlusion: the dark, tight patch right under a car (its hitbox footprint) or a ball resting on the floor,
+// darkening the AMBIENT light too (the soft sun shadow alone left the floor under a car fully sky-lit, which read as
+// the car hovering). Fades out within ~70 uu of lift, so it only shows while the body is actually near the floor.
+float contactAO(vec3 p) {
+    float ao = 0.0;
+    for (int i = 0; i < nCasters; i++) {
+        vec4 c = casters[i];
+        float h = c.z - p.z;
+        if (h < -20.0 || h > 260.0) continue;
+        vec2 d = p.xy - c.xy;
+        vec2 f = casterFwd[i];
+        float o;
+        if (dot(f, f) > 0.0) {                                  // car: Octane hitbox 120 x 85, centre ~17 uu up
+            vec2 q = vec2(dot(d, f), dot(d, vec2(-f.y, f.x)));
+            float sd = sdRoundBox(q - vec2(10.0, 0.0), vec2(64.0, 44.0), 26.0);
+            float lift = max(h - 17.0, 0.0);
+            float fade = 1.0 - smoothstep(0.0, 70.0, lift);
+            // soft skirt reaching ~40 uu out past the body (sky blocked by the car), dark core under the floor pan
+            o = (1.0 - smoothstep(-24.0, 40.0 + 0.5 * lift, sd)) * (0.78 - 0.30 * smoothstep(-40.0, 10.0, sd));
+            // the four tyre contact patches (RocketSim Octane wheel positions, front r 12.5 / rear r 15)
+            float df = length(vec2(q.x - 51.25, abs(q.y) - 25.9)) - 6.0;
+            float db = length(vec2(q.x + 33.75, abs(q.y) - 29.5)) - 7.0;
+            o = max(o, 0.9 * (1.0 - smoothstep(0.0, 20.0, min(df, db))));
+            o *= fade;
+        } else {                                                // ball: a small dark core where it sits
+            float lift = max(h - 92.75, 0.0);
+            o = (1.0 - smoothstep(0.0, 62.0 + 0.6 * lift, length(d))) * (1.0 - smoothstep(0.0, 90.0, lift)) * 0.6;
+        }
+        ao = max(ao, o);
+    }
+    return ao;
+}
+'''
+
 # --------------------------------------------------------------------------------------------- #
 ARENA_VERT = '''
 #version 330
@@ -79,9 +139,7 @@ ARENA_FRAG = '''
 #version 330
 ''' + COMMON + '''
 uniform vec3 camPos;
-uniform vec4 casters[9];
-uniform vec2 casterFwd[9];
-uniform int nCasters;
+''' + CASTERS + '''
 uniform vec3 blueCol;
 uniform vec3 orangeCol;
 uniform int passMode;          // 0 = opaque parts, 1 = translucent walls + ceiling
@@ -93,6 +151,7 @@ uniform vec3 grassCol;         // the turf's base colour on this map
 uniform sampler2D bladeTex;    // the blade pattern (BLADE_FRAG), 16 texels per blade cell, 128 cells, repeating
 uniform sampler2D grainTex;    // the turf grain (GRAIN_FRAG), repeating every 768 uu
 uniform float glassK;          // wall / ceiling glass opacity factor (1 = valley)
+uniform int bakeAlbedo;        // 1 = top-down bake of the turf + markings colour (unlit) for the 3D grass blades
 
 // Greek-key (meander) tile, 5x5 cells, row 0 at the bottom (Forbidden Temple's centre band)
 const float KEY[25] = float[25](1.,1.,1.,1.,1.,  1.,0.,0.,0.,1.,  1.,0.,1.,1.,1.,  1.,0.,0.,0.,0.,  1.,1.,1.,1.,1.);
@@ -116,10 +175,6 @@ float hexEdge(vec2 p, float s) {
     g = abs(g);
     return (0.5 - max(dot(g, normalize(r)), g.x)) * s;
 }
-float sdRoundBox(vec2 p, vec2 b, float r) {
-    vec2 q = abs(p) - b + r;
-    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
-}
 // inside the playable footprint (walls + 45deg corners + goal mouths)?
 float footprint(vec2 p) {
     float field = max(max(abs(p.x) - 4096.0, abs(p.y) - 5120.0), (abs(p.x) + abs(p.y) - 8064.0) * 0.7071);
@@ -130,42 +185,35 @@ float footprint(vec2 p) {
 // outer ring on the ball's x/y, and an inner ring of 4 arcs that is almost as big as the outer one when the
 // ball is on the ground and shrinks (arcs shortening) as it rises, down to 4 dots by ~half the ceiling height.
 // The two never touch. Derivatives are taken before any masking (no divergent fwidth).
+// Coverage of a line of half-width w (world units) at distance d, for a pixel whose footprint ACROSS the line is
+// g world units. Energy-preserving: once the line is thinner than a pixel it keeps a one-pixel width and fades by
+// w / w' instead of getting fatter -- widening it (the old max(w, fw)) turned a far or grazing-angle ring into a
+// thick blotchy band, fattest where the ellipse runs across the view.
+float lineCov(float d, float w, float g) {
+    float we = max(w, 0.5 * g);
+    return clamp((we - abs(d)) / g + 0.5, 0.0, 1.0) * (w / we);
+}
 float ballMarkAt(vec3 p, vec3 n) {
     vec2 d = p.xy - ballMark.xy;
     float r = length(d);
-    float fw = max(fwidth(r), 1e-3);
     float t = clamp(ballMark.w, 0.0, 1.0);
     const float RO = 91.25;                                       // the outer ring = the ball's size
-    float wo = max(2.4, 0.8 * fw);
-    float outer = 1.0 - smoothstep(wo - fw, wo + fw, abs(r - RO));
+    // pixel footprint along the ring's normal (its true screen-space gradient length; fwidth = |dx|+|dy|
+    // overestimates it up to 1.4x on diagonals, which showed as uneven ring thickness)
+    float gr = max(length(vec2(dFdx(r), dFdy(r))), 1e-3);
+    float outer = lineCov(r - RO, 2.4, gr);
     float ri = RO * mix(0.80, 0.33, t);
     float hs = 0.72 * pow(1.0 - t, 0.8);                         // half angle of each arc (rad)
     float a = atan(d.y, d.x) - 0.78539816;                        // arcs centred on the diagonals
     float dl = a - floor(a / 1.5707963 + 0.5) * 1.5707963;
     float ang = a - dl + clamp(dl, -hs, hs) + 0.78539816;
     float di = length(d - ri * vec2(cos(ang), sin(ang)));
-    float wi = max(mix(2.4, 3.6, t), 0.8 * fw);                   // the dots a bit fatter than the line
-    float inner = 1.0 - smoothstep(wi - fw, wi + fw, di);
+    float gi = max(length(vec2(dFdx(di), dFdy(di))), 1e-3);
+    float inner = lineCov(di, mix(2.4, 3.6, t), gi);              // the dots a bit fatter than the line
     // any surface facing up at all (floor, the whole floor-wall curve up to where it turns vertical), not above
     // the ball's top: a ball resting against the wall projects onto the curve higher than its centre
     float on = step(0.0, ballMark.w) * step(p.z, ballMark.z + 91.25) * step(0.03, n.z) * step(r, 120.0);
     return max(outer, inner) * on;
-}
-float shadowAt(vec3 p) {
-    float sh = 0.0;
-    for (int i = 0; i < nCasters; i++) {
-        vec4 c = casters[i];
-        float h = c.z - p.z;
-        if (h < -20.0) continue;
-        vec2 d = p.xy - c.xy;
-        vec2 f = casterFwd[i];
-        if (dot(f, f) > 0.0) { vec2 fr = vec2(-f.y, f.x); d = vec2(dot(d, f) / 1.55, dot(d, fr)); }
-        float soft = 1.0 + h / 900.0;
-        float r = c.w * soft;
-        float a = 1.0 - smoothstep(r * 0.45, r, length(d));
-        sh = max(sh, a * (1.0 - smoothstep(300.0, 2600.0, h)) * (0.6 / soft));
-    }
-    return sh;
 }
 
 void main() {
@@ -307,7 +355,7 @@ void main() {
                 emis += tc * fz * (1.0 - dark) * 0.12;
                 emis += mix(tc * 1.8, vec3(0.75, 0.92, 1.0), 0.35) * white * 0.9;
                 col = mix(col, vec3(0.9), white * 0.35);
-                spec = 0.30;
+                spec = 0.0;                                   // matte deck (was a glossy 0.30 sheen)
             } else {
                 // paint: zones sit on slightly darker turf, team colour over it, dark chevrons over solid fills
                 col *= 1.0 - 0.18 * zone;
@@ -385,6 +433,7 @@ void main() {
         }
     }
 
+    if (bakeAlbedo == 1) { f_color = vec4(col, grid && !inGoal ? 1.0 : 0.0); return; }
     float bmk = ballMarkAt(p, n) * (ceil ? 0.0 : 1.0);
     col = mix(col, vec3(0.85), bmk * 0.85);
     emis = mix(emis, vec3(0.40), bmk);
@@ -394,13 +443,139 @@ void main() {
     float ndl = max(dot(n, SUN_DIR), 0.0);
     vec3 amb = mix(vec3(0.12, 0.11, 0.12), vec3(0.42, 0.40, 0.46), n.z * 0.5 + 0.5) * uAmb;
     float sh = grid ? shadowAt(p) : 0.0;
-    vec3 lit = col * (amb * 1.25 + SUN_COL * ndl * 0.75 * (1.0 - sh));
+    float ao = grid ? contactAO(p) : 0.0;
+    vec3 lit = col * (amb * 1.25 + SUN_COL * ndl * 0.75 * (1.0 - sh)) * (1.0 - ao);
     vec3 H = normalize(SUN_DIR + V);
     lit += SUN_COL * spec * pow(max(dot(n, H), 0.0), 30.0) * (1.0 - sh);
     lit += emis;
     float dist = length(camPos - p);
     lit = mix(lit, vec3(0.30, 0.20, 0.22), smoothstep(5000.0, 16000.0, dist) * 0.35);
     f_color = vec4(to_srgb(lit) * (passMode == 1 ? alpha : 1.0), alpha);   // premultiplied in pass 1
+}
+'''
+
+# --------------------------------------------------------------------------------------------- #
+# 3D grass: real blades (one tapered, bent triangle each) on the field near the camera. Fully generated on the GPU:
+# one instance per 128 uu field tile (main.py culls tiles to the view and sorts them into a few blade-count buckets
+# by distance); gl_VertexID picks the blade. Blade k of a tile sits at the k-th point of the R2 low-discrepancy
+# sequence (shifted per tile), so ANY prefix of a tile's blades is evenly spread: thinning with distance just drops
+# the last blades of the prefix, each shrinking to nothing over a band -- no popping, no visible LOD rings. The
+# colour comes from a top-down bake of the floor shader (turf + markings), so blades on a line are line-coloured.
+GRASS_VERT = '''
+#version 330
+''' + COMMON + CASTERS + '''
+uniform mat4 m_vp;
+uniform vec3 camPos;
+uniform float time;
+uniform float tileSize;
+uniform float density0;     // blades per tile at full density
+uniform float nearD;        // full density within this distance of the camera; ~1/d^2 beyond (constant on screen)
+uniform float farD;         // no blades past this
+uniform float bladeH;       // mean blade height (uu)
+uniform vec4 ballMark;      // as the arena shader: ball x, y, centre z, height factor (< 0 = off)
+uniform sampler2D albedoTex;
+in vec2 i_tile;             // tile min corner
+out vec3 v_col;
+out vec3 v_nrm;
+out vec3 v_pos;
+out float v_t;              // 0 root .. 1 tip
+out float v_light;          // (1 - sun shadow) at the root
+out float v_ao;
+
+float markRoot(vec2 q) {                    // RL ball marker at a blade root (no derivatives: blades are discrete)
+    if (ballMark.w < 0.0 || ballMark.z > 1400.0) return 0.0;
+    vec2 d = q - ballMark.xy;
+    float r = length(d);
+    if (r > 100.0) return 0.0;
+    float t = clamp(ballMark.w, 0.0, 1.0);
+    float outer = step(abs(r - 91.25), 3.2);
+    float ri = 91.25 * mix(0.80, 0.33, t);
+    float hs = 0.72 * pow(1.0 - t, 0.8);
+    float a = atan(d.y, d.x) - 0.78539816;
+    float dl = a - floor(a / 1.5707963 + 0.5) * 1.5707963;
+    float ang = a - dl + clamp(dl, -hs, hs) + 0.78539816;
+    float inner = step(length(d - ri * vec2(cos(ang), sin(ang))), mix(3.2, 4.4, t));
+    return max(outer, inner);
+}
+
+void main() {
+    int blade = gl_VertexID / 3;
+    int k = gl_VertexID - blade * 3;
+    vec2 seed = vec2(hash1(i_tile * 0.0131 + 0.7), hash1(i_tile * 0.0173 + 5.3));
+    vec2 f = fract(seed + vec2(0.7548776662, 0.5698402910) * float(blade + 1));
+    vec2 root = i_tile + f * tileSize;
+    float d = length(camPos - vec3(root, 0.0));
+    float want = density0 * min(1.0, nearD * nearD / max(d * d, 1.0));
+    float keep = clamp((want - float(blade)) / max(0.3 * want, 1.0), 0.0, 1.0);
+    keep *= 1.0 - smoothstep(0.65 * farD, farD, d);
+    // only on the turf the floor shader keeps (its cut where the ramps start), a little inside it
+    float inner = max(max(abs(root.x) - 3760.0, abs(root.y) - 4880.0), (abs(root.x) + abs(root.y) - 8064.0) * 0.7071 + 330.0);
+    keep *= 1.0 - smoothstep(-40.0, -10.0, inner);
+
+    float r1 = hash1(root * 1.37 + 0.1), r2 = hash1(root * 2.11 + 7.0), r3 = hash1(root * 0.73 + 3.0);
+    float h = bladeH * (0.55 + 0.9 * r1 * r1) * keep;
+    // pressed flat under the cars' wheels / body and under a ball sitting on the turf
+    float ao = 0.0, lit = 1.0;
+    for (int i = 0; i < nCasters; i++) {
+        vec4 c = casters[i];
+        vec2 dd = root - c.xy;
+        vec2 fw = casterFwd[i];
+        if (dot(fw, fw) > 0.0) {
+            vec2 q = vec2(dot(dd, fw), dot(dd, vec2(-fw.y, fw.x)));
+            float sd = sdRoundBox(q - vec2(4.0, 0.0), vec2(58.0, 40.0), 20.0);
+            h *= mix(1.0, 0.25, (1.0 - smoothstep(-2.0, 10.0, sd)) * (1.0 - smoothstep(24.0, 40.0, c.z)));
+        } else {
+            h *= mix(1.0, 0.3, (1.0 - smoothstep(20.0, 55.0, length(dd))) * (1.0 - smoothstep(96.0, 110.0, c.z)));
+        }
+    }
+    vec3 rp = vec3(root, 0.0);
+    lit = 1.0 - shadowAt(rp);
+    ao = contactAO(rp);
+
+    float yaw = r2 * 6.2831853;
+    vec2 side = vec2(cos(yaw), sin(yaw));
+    vec2 across = vec2(-side.y, side.x);
+    float wind = sin(time * 1.6 + root.x * 0.004 + root.y * 0.006) * 0.5 + sin(time * 2.9 + root.y * 0.011) * 0.25;
+    vec2 lean = across * (r3 - 0.5) * 1.1 + vec2(0.6, 0.35) * wind * 0.35;
+    float w = 0.55 + 0.5 * r3;
+    vec3 tip = vec3(root + lean * h, h * (1.0 - 0.25 * dot(lean, lean)));
+    vec3 P = k == 2 ? tip : vec3(root + side * w * (k == 0 ? -0.5 : 0.5), 0.0);
+    v_pos = P;
+    v_t = k == 2 ? 1.0 : 0.0;
+    v_nrm = normalize(cross(tip - rp, vec3(side, 0.0)));
+    vec3 alb = textureLod(albedoTex, root / vec2(8400.0, 10400.0) + 0.5, 0.0).rgb;
+    v_col = mix(alb * (0.85 + 0.3 * r1), vec3(0.85), markRoot(root) * 0.85);
+    v_light = lit;
+    v_ao = ao;
+    gl_Position = m_vp * vec4(P, 1.0);
+    if (h < 0.05) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);   // culled blade: a degenerate point off screen
+}
+'''
+
+GRASS_FRAG = '''
+#version 330
+''' + COMMON + '''
+uniform vec3 camPos;
+in vec3 v_col;
+in vec3 v_nrm;
+in vec3 v_pos;
+in float v_t;
+in float v_light;
+in float v_ao;
+out vec4 f_color;
+void main() {
+    vec3 n = normalize(v_nrm);
+    vec3 V = normalize(camPos - v_pos);
+    if (dot(n, V) < 0.0) n = -n;
+    // lit mostly like the floor under it (so the far, thinning blades melt into the turf), a little by the blade
+    n = normalize(mix(vec3(0.0, 0.0, 1.0), n, 0.4));
+    float ndl = max(dot(n, SUN_DIR), 0.0);
+    vec3 amb = mix(vec3(0.12, 0.11, 0.12), vec3(0.42, 0.40, 0.46), n.z * 0.5 + 0.5) * uAmb;
+    vec3 col = v_col * mix(0.62, 1.22, v_t) + vec3(0.012, 0.018, 0.0) * v_t;       // dark roots, sunlit tips
+    vec3 lit = col * (amb * 1.25 + SUN_COL * ndl * 0.75 * v_light) * (1.0 - v_ao);
+    // light through the blade tips when looking toward the sun
+    lit += col * SUN_COL * 0.25 * v_t * v_light * pow(max(dot(-V, SUN_DIR), 0.0), 4.0);
+    f_color = vec4(to_srgb(lit), 1.0);
 }
 '''
 

@@ -51,6 +51,7 @@ class Config:
                    int(os.environ.get("RSV_MSAA", "4"))),
         "gfx_resolution": ("Resolution", [("auto", "Balanced (max 2.1 MP, upscaled)"), ("native", "Native"),
                                           ("150", "Supersampled 1.5x"), ("200", "Supersampled 2x")], "auto"),
+        "gfx_grass": ("3D grass", [(0, "Off"), (1, "Low"), (2, "Medium"), (3, "High")], 2),
         "gfx_detail": ("Distant detail", [("smooth", "Smooth"), ("sharp", "Sharp (may shimmer)")], "smooth"),
         "gfx_vsync": ("VSync", [(1, "On"), (0, "Off")], int(os.environ.get("RSV_VSYNC", "1"))),
         "gfx_fps": ("Frame rate cap", [(0, "Monitor refresh"), (60, "60"), (120, "120"), (144, "144"),

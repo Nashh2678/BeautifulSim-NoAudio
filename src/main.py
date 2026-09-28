@@ -416,7 +416,112 @@ class RSVRenderer:
 
     def _theme_programs(self):
         return (self.prog_rl_arena, self.prog_car, self.prog_ball, self.prog_sky, self.prog_stadium, self.prog_pad,
-                self.prog_scene, self.prog_crowd)
+                self.prog_scene, self.prog_crowd, self.prog_grass)
+
+    # ---- 3D grass (GRASS_VERT) ---------------------------------------------------------------------------------- #
+    GRASS_TILE = 128.0
+    # config gfx_grass -> (blades per tile at full density, full-density radius, max distance, blade height)
+    GRASS_LEVELS = {1: (1100.0, 300.0, 1500.0, 5.5), 2: (2400.0, 380.0, 2300.0, 6.0), 3: (4000.0, 480.0, 3200.0, 6.0)}
+    TURF_BAKE = (2048, 2560)                     # top-down turf colour for the blades: ~4.1 uu per texel
+
+    def _init_grass(self):
+        self.prog_grass = self.ctx.program(vertex_shader=rl_shaders.GRASS_VERT, fragment_shader=rl_shaders.GRASS_FRAG)
+        T = self.GRASS_TILE
+        xs = np.arange(-3840.0, 3840.0, T)
+        ys = np.arange(-4864.0, 4864.0, T)
+        gx, gy = np.meshgrid(xs, ys)
+        self._grass_tiles = np.stack([gx.ravel(), gy.ravel()], 1).astype("f4")      # tile min corners
+        self._grass_ctr = (self._grass_tiles + T / 2).astype("f8")
+        self._grass_ibuf = self.ctx.buffer(reserve=len(self._grass_tiles) * 8, dynamic=True)
+        self._grass_vao = self.ctx.vertex_array(self.prog_grass, [(self._grass_ibuf, "2f/i", "i_tile")])
+        self.prog_grass["tileSize"].value = T
+        self.prog_grass["albedoTex"].value = 8
+        self._turf_tex = None
+        self._turf_map = None
+
+    def _bake_turf(self):
+        """The floor shader's unlit turf + markings colour, rendered top-down once per map (texture unit 8)."""
+        W, H = self.TURF_BAKE
+        if self._turf_tex is None:
+            self._turf_tex = self.ctx.texture((W, H), 4, dtype="f1")
+            self._turf_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+            self._turf_depth = self.ctx.depth_renderbuffer((W, H))
+            self._turf_fbo = self.ctx.framebuffer(color_attachments=[self._turf_tex], depth_attachment=self._turf_depth)
+        # orthographic, straight down: x -> +-4200, y -> +-5200 (column-major bytes; diagonal, so no transpose)
+        ortho = np.diag([1.0 / 4200.0, 1.0 / 5200.0, -1.0 / 3000.0, 1.0]).astype("f4")
+        pa = self.prog_rl_arena
+        self._turf_fbo.use()
+        self._turf_fbo.clear(0.0, 0.0, 0.0, 0.0, depth=1.0)
+        self.ctx.enable(moderngl.DEPTH_TEST)
+        self.ctx.disable(moderngl.BLEND)
+        self.ctx.disable(moderngl.CULL_FACE)
+        pa["m_vp"].write(ortho.tobytes())
+        pa["camPos"].value = (0.0, 0.0, 3000.0)
+        pa["bakeAlbedo"].value = 1
+        pa["passMode"].value = 0
+        pa["detailBias"].value = 1.0
+        self._blade_tex.use(location=5)
+        self._grain_tex.use(location=7)
+        self.vaos['ArenaMeshCustom.obj'].render(moderngl.TRIANGLES)
+        pa["bakeAlbedo"].value = 0
+        self.ctx.enable(moderngl.BLEND)
+        self._turf_map = self.map_name
+
+    def _render_grass(self, vp, camera_pos, tnow, cst, cfw, n_casters, ball_mark):
+        level = int(getattr(self.config, "gfx_grass", 2))
+        if level <= 0 or self.map_name == "space" or "grass" in _SKIP:
+            return
+        dens, near, far, bh = self.GRASS_LEVELS.get(level, self.GRASS_LEVELS[2])
+        if self._turf_map != self.map_name:
+            self._bake_turf()
+            self.render_target.use()
+        cx, cy, cz = float(camera_pos[0]), float(camera_pos[1]), float(camera_pos[2])
+        # distance from the camera to each tile's nearest point on the floor
+        h = self.GRASS_TILE / 2
+        dx = np.maximum(np.abs(self._grass_ctr[:, 0] - cx) - h, 0.0)
+        dy = np.maximum(np.abs(self._grass_ctr[:, 1] - cy) - h, 0.0)
+        dmin = np.sqrt(dx * dx + dy * dy + cz * cz)
+        sel = dmin < far
+        if not sel.any():
+            return
+        # view frustum (planes of the column-convention matrix M = vp^T), tile bounding sphere r = half diagonal
+        M = np.asarray(vp, "f8").reshape(4, 4).T
+        ctr = self._grass_ctr[sel]
+        idx = np.nonzero(sel)[0]
+        r = h * 1.4143 + 12.0
+        for pl in (M[3] + M[0], M[3] - M[0], M[3] + M[1], M[3] - M[1], M[3] + M[2]):
+            s = pl[0] * ctr[:, 0] + pl[1] * ctr[:, 1] + pl[3] + r * np.sqrt(pl[0] ** 2 + pl[1] ** 2 + pl[2] ** 2)
+            keep = s >= 0.0
+            ctr, idx = ctr[keep], idx[keep]
+        if len(idx) == 0:
+            return
+        want = dens * np.minimum(1.0, (near * near) / np.maximum(dmin[idx] ** 2, 1.0))
+        pg = self.prog_grass
+        pg["m_vp"].write(vp.tobytes())
+        pg["camPos"].value = (cx, cy, cz)
+        pg["time"].value = tnow
+        pg["density0"].value = dens
+        pg["nearD"].value = near
+        pg["farD"].value = far
+        pg["bladeH"].value = bh
+        pg["casters"].write(cst.tobytes())
+        pg["casterFwd"].write(cfw.tobytes())
+        pg["nCasters"].value = n_casters
+        pg["ballMark"].value = ball_mark
+        self._turf_tex.use(location=8)
+        self.ctx.disable(moderngl.CULL_FACE)
+        # blade-count buckets: each tile drawn with the smallest bucket that covers the blades it wants (<= 2x waste)
+        lo = dens
+        tiles = self._grass_tiles
+        while lo >= 16.0:
+            b = (want <= lo) & (want > lo / 2.0) if lo < dens else (want > lo / 2.0)
+            if b.any():
+                t = tiles[idx[b]]
+                self._grass_ibuf.orphan(len(t) * 8)
+                self._grass_ibuf.write(t.tobytes())
+                self._grass_vao.render(moderngl.TRIANGLES, vertices=int(math.ceil(lo)) * 3, instances=len(t))
+            lo /= 2.0
+        self.ctx.enable(moderngl.CULL_FACE)
 
     def set_map(self, name, save=True):
         """Switch the scenery, sky, light and field style (maps.py). Builds the map's mesh the first time (cached
@@ -624,10 +729,33 @@ class RSVRenderer:
     GOAL_BANNER_S = 3.0          # on screen after a goal (longer while a goal celebration hides the ball)
 
     def _banner_textures(self, team):
-        """'BLUE SCORED!' / 'ORANGE SCORED!' rendered once: a crisp text mask + a blurred glow mask."""
+        """'BLUE SCORED!' / 'ORANGE SCORED!' rendered once: a crisp text mask + a blurred glow mask. The PIL part is
+        prepared on a background thread at startup (_prewarm_banners): built on the first goal, its blur stalled that
+        frame for ~80 ms."""
         tex = self._banner_tex.get(team)
         if tex is not None:
             return tex
+        imgs = self._banner_img.get(team) or self._banner_images(team)
+        out = []
+        for data, size in imgs[:2]:
+            t = self.ctx.texture(size, 1, data)
+            t.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+            t.build_mipmaps()
+            out.append(t)
+        tex = self._banner_tex[team] = (out[0], out[1], imgs[2], imgs[3])
+        return tex
+
+    def _prewarm_banners(self):
+        def work():
+            for team in (0, 1):
+                try:
+                    self._banner_img[team] = self._banner_images(team)
+                except Exception:
+                    pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _banner_images(self, team):
+        """-> ((core bytes, size), (glow bytes, size), aspect, glyph fraction), GL-free (runs on any thread)."""
         from PIL import Image, ImageDraw, ImageFont, ImageFilter
         text = ("BLUE" if team == 0 else "ORANGE") + " SCORED!"
         fonts = os.path.join(os.environ.get("WINDIR", "C:/Windows"), "Fonts")
@@ -653,12 +781,8 @@ class RSVRenderer:
         out = []
         for im in (core, glow):
             im = im.transpose(Image.FLIP_TOP_BOTTOM)
-            t = self.ctx.texture(im.size, 1, im.tobytes())
-            t.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
-            t.build_mipmaps()
-            out.append(t)
-        tex = self._banner_tex[team] = (out[0], out[1], w / float(h), (bb[3] - bb[1]) / float(h))
-        return tex
+            out.append((im.tobytes(), im.size))
+        return out[0], out[1], w / float(h), (bb[3] - bb[1]) / float(h)
 
     def render_goal_banner(self, width, height, state):
         """RL's goal text: golden 'BLUE SCORED!' / 'ORANGE SCORED!' with a warm glow, pops in, holds, fades."""
@@ -786,6 +910,8 @@ class RSVRenderer:
         self._ball_trail_on = False
         self._goal_banner = None               # (scoring team, time) -> "BLUE SCORED!" / "ORANGE SCORED!"
         self._banner_tex = {}
+        self._banner_img = {}
+        self._prewarm_banners()
         self.car_ribbons = []
 
         print("Data path:", DATA_DIR_PATH)
@@ -813,6 +939,7 @@ class RSVRenderer:
         for prog in (self.prog_rl_arena,):
             prog["blueCol"].value = (0.10, 0.40, 1.00)
             prog["orangeCol"].value = (1.00, 0.42, 0.06)
+        self._init_grass()
 
         # Car body: an optional detailed mesh data/Octane_RL.npz (pos, normal, material id, 4 separate
         # wheels) -- not included here -- else RocketSimVis's low-poly Octane.obj converted to the same
@@ -2512,6 +2639,7 @@ class RSVRenderer:
             self._space_cube.use(location=6)
         if "arena" not in _SKIP:
             self.vaos['ArenaMeshCustom.obj'].render(moderngl.TRIANGLES)
+        self._render_grass(vp, camera_pos, tnow, cst, cfw, len(casters), self.prog_rl_arena["ballMark"].value)
         # Draw order is for overdraw: everything opaque first, so the depth test rejects the hidden
         # parts of the stadium and the sky only shades the pixels nothing else covered.
         self.ctx.disable(moderngl.CULL_FACE)
@@ -3049,6 +3177,63 @@ def set_swap_interval(n):
         return False
 
 
+class FramePacer:
+    """VSync at the monitor's refresh when the machine keeps up, otherwise EVERY OTHER refresh (swap interval 2).
+
+    On the 165 Hz panel a frame has 6.1 ms; the vis needs ~5-7 ms (more on the heavier maps, or while training takes
+    the CPU), so frames straddled the budget and the display alternated between 165 and 82 fps at random -- the
+    "random frame drops" (worst on Parc de Paris, the heaviest map). A steady half rate looks smooth; the jitter did
+    not. Every PROBE_S seconds at half rate it tries full rate again for a moment and keeps it if frames fit."""
+    WINDOW = 90                  # frames per decision
+    MISS = 0.08                  # > 8% of frames late = can't hold this rate
+    PROBE_S = 20.0
+
+    def __init__(self, refresh_hz):
+        self.period = 1.0 / max(30.0, float(refresh_hz))
+        self.interval = 1
+        self.applied = None
+        self.last = None
+        self.late = self.n = 0
+        self.probe_at = time.monotonic() + self.PROBE_S
+        self.probing = False
+
+    def reset(self):
+        self.last = None
+        self.late = self.n = 0
+
+    def frame(self, enabled):
+        """Call once per painted frame -> the swap interval to use."""
+        if not enabled:
+            self.interval, self.probing = 1, False
+            self.reset()
+            return 0
+        now = time.monotonic()
+        if self.last is not None:
+            dt = now - self.last
+            if dt > 0.25:                                # a pause (unfocused), not a frame
+                self.reset()
+            else:
+                self.n += 1
+                self.late += dt > (self.interval + 0.5) * self.period
+        self.last = now
+        if self.n >= self.WINDOW:
+            miss = self.late / float(self.n)
+            if self.interval == 1 and miss > self.MISS:
+                self.interval = 2
+                self.probe_at = now + (self.PROBE_S * 3 if self.probing else self.PROBE_S)
+                print("[pacing] {:.0f}% late at {:.0f} fps -> {:.0f} fps".format(
+                    100 * miss, 1 / self.period, 0.5 / self.period), flush=True)
+            elif self.interval == 1 and self.probing:
+                print("[pacing] back to {:.0f} fps".format(1 / self.period), flush=True)
+            self.probing = False
+            self.reset()
+            self.last = now
+        if self.interval == 2 and now >= self.probe_at:
+            self.interval, self.probing = 1, True
+            self.reset()
+        return self.interval
+
+
 class QRSVGLWidget(QtOpenGL.QGLWidget):
     """The window's GL surface: owns the Qt/OpenGL context and forwards everything to RSVRenderer."""
 
@@ -3076,6 +3261,20 @@ class QRSVGLWidget(QtOpenGL.QGLWidget):
 
     def paintGL(self):
         want = int(self.config.gfx_vsync)
+        pacer = getattr(self, "pacer", None)
+        if pacer is not None:
+            # VSync on + "Monitor refresh": full or half refresh, whichever the machine holds (FramePacer)
+            auto = want == 1 and self.config.gfx_fps == 0
+            if pacer.n == 0:                             # the refresh of the screen the window is on now
+                try:
+                    hz = float(self.window().windowHandle().screen().refreshRate())
+                    if hz >= 30.0 and abs(1.0 / hz - pacer.period) > 1e-4:
+                        pacer.period = 1.0 / hz
+                except Exception:
+                    pass
+            iv = pacer.frame(auto)
+            if auto:
+                want = iv
         if want != self._vsync:
             set_swap_interval(want)
             self._vsync = want
@@ -3204,6 +3403,22 @@ def main():
     fps = refresh if fps_env <= 0 else min(refresh, fps_env)
     frame_ms = int(os.environ.get("RSV_FRAME_MS", max(1, int(1000.0 / max(1.0, fps)))))
     print("[timing] monitor {:.0f} Hz -> frame interval {} ms".format(refresh, frame_ms), flush=True)
+    gl_widget.pacer = FramePacer(refresh)
+    # Frame-time spikes: (1) while training runs, its collection threads keep every core busy and the render thread
+    # had to wait its turn at normal priority -> above normal (it uses the same CPU time, just on time); (2) every
+    # startup object (meshes' Python wrappers, modules, caches) was rescanned by each full GC pass (~20 ms) -> frozen.
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.windll.kernel32
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+        k32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        k32.SetPriorityClass(k32.GetCurrentProcess(), 0x8000)       # ABOVE_NORMAL_PRIORITY_CLASS
+    except Exception:
+        pass
+    import gc as _gc
+    _gc.collect()
+    _gc.freeze()
     render_timer.start(frame_ms)
 
     pose_timer = None

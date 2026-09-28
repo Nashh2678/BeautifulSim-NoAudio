@@ -296,7 +296,8 @@ class ClipRecorder:
                            "base": self._done_mtime()}
             subprocess.Popen([sys.executable, script, "--replay", replay, "--out", out, "--done", self._done_path],
                              stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT,
-                             creationflags=0x08000000 if os.name == "nt" else 0)
+                             # no window; NORMAL priority (the vis itself runs above normal, children would inherit it)
+                             creationflags=(0x08000000 | 0x20) if os.name == "nt" else 0)
             print("[clip] rendering {:.1f}s ({} packets) on the dGPU -> {}".format(
                 now - max(t_start, packets[0][0]), len(packets), out))
         except Exception as e:
