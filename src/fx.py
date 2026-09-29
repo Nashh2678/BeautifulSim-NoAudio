@@ -215,6 +215,8 @@ class FX:
         quad = np.array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1], "f4")
         self.ring_vao = ctx.vertex_array(self.ring_prog, [(ctx.buffer(quad.tobytes()), "2f", "in_xy")])
         self._boost_accum = {}
+        self._boost_last_base = {}
+        self.flares = []                           # hit flashes: [pos, age, life, size]
         self._rng = np.random.default_rng()
         self.trail_prog = ctx.program(vertex_shader=TRAIL_VERT, fragment_shader=TRAIL_FRAG)
         self.trail_vbo = ctx.buffer(reserve=8192 * 7 * 4, dynamic=True)
@@ -356,46 +358,68 @@ class FX:
         return d / np.linalg.norm(d, axis=1, keepdims=True)
 
     NOZZLE = (-57.0, 0.0, 10.0)     # Octane exhaust, car space
+    ALPHA_HOT = (1.0, 0.90, 0.55)    # Alpha Boost: golden-yellow streams, white-hot orange glow at the nozzle. One look for
+    ALPHA_FLAME = (1.0, 0.62, 0.08)  # both teams.
+    STREAM_OFFSET = 9.0              # the two streams leave the exhaust this far to each side
+    STREAM_RATE = 480.0              # particles per second per stream
 
     def boost(self, key, pos, fwd, up, car_vel, team, dt, model_bytes=None):
-        """Boosting car this frame: a 3D flame cone attached to the car (drawn with the car's model
-        matrix, so it never turns with the camera) + nozzle glow + a few sparks."""
+        """Boosting car this frame (Alpha Boost look): a hot glow at the exhaust plus two long, ragged golden streams
+        that stay where they were emitted, so the moving car leaves them behind it. Emission is spread along the
+        path the car took since the last frame (no gaps at speed / low fps)."""
         fwd = np.asarray(fwd, "f4"); up = np.asarray(up, "f4")
-        base = np.asarray(pos, "f4") + fwd * self.NOZZLE[0] + up * self.NOZZLE[2]
+        pos = np.asarray(pos, "f4")
+        base = pos + fwd * self.NOZZLE[0] + up * self.NOZZLE[2]
         cv = np.asarray(car_vel, "f4")
-        hot, flame = TEAM_BOOST[int(team) & 1]
-        if model_bytes is not None:
-            self._flames.append((model_bytes, hot, flame))
-        fl = float(self._rng.uniform(0.9, 1.1))
-        self.add.spawn(base[None, :], cv[None, :], np.array([0.02], "f4"), np.array([50.0 * fl], "f4"), 40.0,
-                       np.array([*hot, 0.65], "f4"), np.array([*flame, 0.0], "f4"))
-        # smoke trail left in the world behind the car (RL's standard boost leaves a smoky wake)
-        sacc = self._boost_accum.get(("smoke", key), 0.0) + 70.0 * dt
-        ks = int(sacc)
-        self._boost_accum[("smoke", key)] = sacc - ks
-        if ks > 0:
-            ks = min(ks, 6)
-            jit = self._rng.normal(0.0, 1.0, (ks, 3)).astype("f4")
-            sp = base[None, :] - fwd[None, :] * self._rng.uniform(40, 110, (ks, 1)) + jit * 6.0
-            sv = cv[None, :] * 0.25 - fwd[None, :] * 150.0 + jit * 40.0 + np.array([0, 0, 60], "f4")
-            tint = np.array([0.55, 0.55, 0.58, 0.42], "f4")
-            tint[:3] = tint[:3] * 0.8 + np.asarray(flame, "f4") * 0.2
-            self.alpha.spawn(sp, sv, self._rng.uniform(0.5, 0.9, ks), self._rng.uniform(22, 32, ks), 95.0,
-                             tint, np.array([0.45, 0.45, 0.48, 0.0], "f4"), drag=2.0)
-        rate = 120.0
-        acc = self._boost_accum.get(key, 0.0) + rate * dt
-        k = int(acc)
-        self._boost_accum[key] = acc - k
-        if k <= 0:
-            return
-        k = min(k, 8)
+        hot, flame = self.ALPHA_HOT, self.ALPHA_FLAME
+        rng = self._rng
+        fl = float(rng.uniform(0.9, 1.1))
+        # exhaust glow: bright warm core, orange halo
+        self.add.spawn(base[None, :], cv[None, :], np.array([0.02], "f4"), np.array([44.0 * fl], "f4"), 36.0,
+                       np.array([*hot, 0.75], "f4"), np.array([*flame, 0.0], "f4"))
+        self.add.spawn(base[None, :], cv[None, :], np.array([0.02], "f4"), np.array([16.0 * fl], "f4"), 14.0,
+                       np.array([1.0, 1.0, 0.9, 0.9], "f4"), np.array([1.0, 0.8, 0.4, 0.0], "f4"))
+        prev = self._boost_last_base.get(key)
+        self._boost_last_base[key] = base.copy()
+        if prev is None or float(np.linalg.norm(base - prev)) > 400.0:
+            prev = base
         right = np.array([fwd[1] * up[2] - fwd[2] * up[1], fwd[2] * up[0] - fwd[0] * up[2],
                           fwd[0] * up[1] - fwd[1] * up[0]], "f4")
-        spread = self._rng.normal(0.0, 1.0, (k, 2)).astype("f4")
-        p = base - fwd * self._rng.uniform(20, 90, (k, 1)) + (spread[:, :1] * right + spread[:, 1:] * up) * 4.0
-        v = -fwd * self._rng.uniform(300, 600, (k, 1)) + cv + (spread[:, :1] * right + spread[:, 1:] * up) * 120.0
-        self.add.spawn(p, v, self._rng.uniform(0.08, 0.18, k), self._rng.uniform(4, 6, k), 1.0,
-                       np.array([*hot, 0.9], "f4"), np.array([*flame, 0.0], "f4"), drag=3.0)
+        acc = self._boost_accum.get(key, 0.0) + self.STREAM_RATE * dt
+        k = int(acc)
+        self._boost_accum[key] = acc - k
+        k = min(k, 10)
+        if k <= 0:
+            return
+        for side in (-1.0, 1.0):
+            f = rng.uniform(0.0, 1.0, (k, 1)).astype("f4")               # where along this frame's path
+            src = prev[None, :] + (base - prev)[None, :] * f + right[None, :] * side * self.STREAM_OFFSET
+            j = rng.normal(0.0, 1.0, (k, 3)).astype("f4")
+            p = src + j * 3.0 - fwd[None, :] * rng.uniform(0.0, 30.0, (k, 1)).astype("f4")
+            v = cv[None, :] * 0.10 - fwd[None, :] * rng.uniform(40.0, 150.0, (k, 1)).astype("f4") + j * 30.0
+            size = rng.uniform(11.0, 22.0, k).astype("f4")
+            life = rng.uniform(0.35, 0.60, k).astype("f4")
+            c0 = np.empty((k, 4), "f4"); c1 = np.empty((k, 4), "f4")
+            m = rng.uniform(0.0, 1.0, (k, 1)).astype("f4")               # yellower vs deeper-orange particles
+            c0[:, :3] = np.array(hot, "f4")[None, :] * m + np.array(flame, "f4")[None, :] * (1.0 - m)
+            c0[:, 3] = rng.uniform(0.55, 0.95, k)
+            c1[:, :3] = np.array([1.0, 0.45, 0.05], "f4")[None, :]
+            c1[:, 3] = 0.0
+            self.add.spawn(p, v, life, size, 2.5, c0, c1, drag=2.2)
+
+    def sparkle(self, key, pos, dt):
+        """Supersonic trail speckle: a few tiny white dots left along the thin trail."""
+        rng = self._rng
+        acc = self._boost_accum.get(("sp", key), 0.0) + 70.0 * dt
+        k = int(acc)
+        self._boost_accum[("sp", key)] = acc - k
+        k = min(k, 3)
+        if k <= 0:
+            return
+        j = rng.normal(0.0, 1.0, (k, 3)).astype("f4")
+        self.add.spawn(np.asarray(pos, "f4")[None, :] + j * 2.5, j * 25.0, rng.uniform(0.18, 0.34, k),
+                       rng.uniform(2.0, 3.6, k), 1.2, np.array([1.0, 1.0, 1.0, 0.9], "f4"),
+                       np.array([0.85, 0.9, 1.0, 0.0], "f4"), drag=1.0)
 
     def _render_flames(self, m_vp_bytes, cam_pos):
         if not self._flames:
@@ -517,11 +541,11 @@ class FX:
             up = np.asarray(ev.get("up", (0, 0, 1)), "f4")
             if k == "jump":
                 c = pos - up * RESET_DISC_BELOW                  # wheel-bottom level: just above the surface
-                self.ring(c, up, 80.0, 80.0, JUMP_GLOW_LIFE, 0.0, (1.0, 0.32, 0.07, 0.95),
+                self.ring(c, up, 64.0, 64.0, JUMP_GLOW_LIFE, 0.0, (1.0, 0.32, 0.07, 0.95),
                           core=(1.0, 0.72, 0.38), mode=2)
             else:
                 c = pos - up * 24.0
-                self.ring(c, up, 62.0, 62.0, JUMP_GLOW_LIFE, 0.0, (1.0, 0.36, 0.08, 1.0),
+                self.ring(c, up, 50.0, 50.0, JUMP_GLOW_LIFE, 0.0, (1.0, 0.36, 0.08, 1.0),
                           core=(1.0, 0.80, 0.45), mode=2, billboard=True, fill=1.0)
         elif k == "demo":
             # DEMO_SCALE: the whole explosion 20% bigger (sizes, spread speeds, offsets, gravity, ring radii);
@@ -590,25 +614,44 @@ class FX:
             self.ring(pos, (0, 0, 1), 60.0, 1300.0, 0.8 / v, 0.05, (*col, 0.8), core=(1, 1, 1), delay=0.08 / v)
 
     def sparks(self, pos, normal, strength):
-        """Sparks where the car BODY touched something (ball, arena, another car): a small warm flash and 4-7
-        orange specks thrown out along the surface, falling and cooling to red. Count / speed scale with the impact."""
+        """A hit (car body on the ball, the arena or another car): a soft orange fireball puff with a hot core and a thin
+        horizontal lens streak through it (not a spray of sparkles), plus a few big, dim embers that drift off. Size and
+        brightness scale with the impact."""
         rng = self._rng
         pos = np.asarray(pos, "f4")
         nrm = np.asarray(normal, "f4")
         ln = float(np.linalg.norm(nrm))
         nrm = nrm / ln if ln > 1e-4 else np.array([0, 0, 1], "f4")
         s = float(np.clip((strength - 100.0) / 1400.0, 0.0, 1.0))
-        self.add.spawn(pos[None, :], np.zeros((1, 3), "f4"), np.array([0.06], "f4"), np.array([22.0 + 22.0 * s], "f4"),
-                       8.0, np.array([1.0, 0.62, 0.22, 0.75], "f4"), np.array([1.0, 0.30, 0.05, 0.0], "f4"))
-        n = 4 + int(round(3 * s))                            # 4-7 specks
+        # the fireball: two overlapping soft puffs + a white-yellow core, growing while they fade
+        self.add.spawn(pos[None, :] + nrm[None, :] * 6.0, nrm[None, :] * 60.0, np.array([0.22], "f4"),
+                       np.array([44.0 + 26.0 * s], "f4"), 120.0 + 70.0 * s,
+                       np.array([1.0, 0.50, 0.10, 0.85], "f4"), np.array([0.95, 0.22, 0.03, 0.0], "f4"), drag=4.0)
+        self.add.spawn(pos[None, :] + nrm[None, :] * 3.0, nrm[None, :] * 30.0, np.array([0.14], "f4"),
+                       np.array([22.0 + 14.0 * s], "f4"), 50.0 + 30.0 * s,
+                       np.array([1.0, 0.86, 0.45, 0.95], "f4"), np.array([1.0, 0.45, 0.08, 0.0], "f4"), drag=4.0)
+        self.flares.append([pos.copy(), 0.0, 0.16, 90.0 + 90.0 * s])
+        n = 2 + int(round(2 * s))
         d = self._rand_dirs(n)
-        d -= nrm[None, :] * (d @ nrm)[:, None] * 0.7        # mostly along the surface...
-        d += nrm[None, :] * 0.45                             # ...and away from it
+        d -= nrm[None, :] * (d @ nrm)[:, None] * 0.5
+        d += nrm[None, :] * 0.5
         d /= np.linalg.norm(d, axis=1, keepdims=True) + 1e-6
-        self.add.spawn(np.repeat(pos[None, :], n, 0), d * rng.uniform(400.0, 1000.0, (n, 1)) * (0.7 + 0.5 * s),
-                       rng.uniform(0.25, 0.50, n), rng.uniform(5.0, 8.0, n), 1.5,
-                       np.array([1.0, 0.72, 0.28, 1.0], "f4"), np.array([0.90, 0.15, 0.03, 0.0], "f4"),
-                       drag=1.6, grav=1100.0)
+        self.add.spawn(np.repeat(pos[None, :], n, 0), d * rng.uniform(150.0, 420.0, (n, 1)) * (0.7 + 0.5 * s),
+                       rng.uniform(0.30, 0.50, n), rng.uniform(11.0, 17.0, n), 4.0,
+                       np.array([1.0, 0.55, 0.12, 0.55], "f4"), np.array([0.85, 0.15, 0.03, 0.0], "f4"),
+                       drag=2.5, grav=300.0)
+
+    def _flare_beams(self):
+        """The horizontal streak of every live hit flash: a thin bright camera-facing beam along the screen's x axis,
+        transparent at both ends and brightest in the middle."""
+        for pos, age, life, size in self.flares:
+            t = age / life
+            a = (1.0 - t) ** 1.5
+            w = 1.2 + 1.6 * (1.0 - t)
+            L = size * (0.55 + 0.6 * t)
+            r = self.cam_right.astype("f4") * L
+            self._beams.append((np.asarray([pos - r, pos, pos + r], "f4"), np.array([w * 0.6, w, w * 0.6], "f4"),
+                                np.array([[1.0, 0.75, 0.35, 0.0], [1.0, 0.92, 0.65, 0.9 * a], [1.0, 0.75, 0.35, 0.0]], "f4")))
 
     # ---------------------------------------------------------------------------------------- #
     def wheel_glow_for(self, idx, now):
@@ -624,6 +667,9 @@ class FX:
         dt = min(dt, 0.1)
         self.add.update(dt)
         self.alpha.update(dt)
+        for f in self.flares:
+            f[1] += dt
+        self.flares = [f for f in self.flares if f[1] < f[2]]
         for g in self.rings:
             # Fixed-size indicators (flip reset / jump) only start aging once they have been SEEN:
             # with a 50 ms life, one slow frame used to age them out before their first draw (the
@@ -720,6 +766,7 @@ class FX:
         ctx = self.ctx
         ctx.enable(moderngl.BLEND)
         ctx.fbo.depth_mask = False                     # particles test depth but never write it
+        self._flare_beams()
         self._render_trails(m_vp_bytes, cam_pos)
         self._render_tubes(m_vp_bytes, cam_pos)
         self._render_flames(m_vp_bytes, cam_pos)

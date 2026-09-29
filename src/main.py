@@ -431,13 +431,28 @@ class RSVRenderer:
         ys = np.arange(-4864.0, 4864.0, T)
         gx, gy = np.meshgrid(xs, ys)
         self._grass_tiles = np.stack([gx.ravel(), gy.ravel()], 1).astype("f4")      # tile min corners
+        self._grass_ncol, self._grass_nrow = len(xs), len(ys)
         self._grass_ctr = (self._grass_tiles + T / 2).astype("f8")
         self._grass_ibuf = self.ctx.buffer(reserve=len(self._grass_tiles) * 8, dynamic=True)
         self._grass_vao = self.ctx.vertex_array(self.prog_grass, [(self._grass_ibuf, "2f/i", "i_tile")])
         self.prog_grass["tileSize"].value = T
         self.prog_grass["albedoTex"].value = 8
+        self.prog_grass["padMask"].value = 9
         self._turf_tex = None
         self._turf_map = None
+        # 1 = grass, 0 = a boost pad's footprint (soft edge): blades must not poke through the pads
+        import states as _st
+        MW, MH = 525, 650                                   # 16 uu / texel over x +-4200, y +-5200
+        gx = (np.arange(MW) + 0.5) / MW * 8400.0 - 4200.0
+        gy = (np.arange(MH) + 0.5) / MH * 10400.0 - 5200.0
+        X, Y = np.meshgrid(gx, gy)
+        mask = np.ones((MH, MW), "f4")
+        for loc in _st.default_boost_pad_locations:
+            big = float(loc[2]) == 73.0
+            rad = 92.0 if big else 50.0
+            mask = np.minimum(mask, np.clip((np.hypot(X - float(loc[0]), Y - float(loc[1])) - rad * 0.6) / (rad * 0.5), 0.0, 1.0))
+        self._pad_mask = self.ctx.texture((MW, MH), 1, (mask * 255.0).astype("u1").tobytes())
+        self._pad_mask.filter = (moderngl.LINEAR, moderngl.LINEAR)
 
     def _bake_turf(self):
         """The floor shader's unlit turf + markings colour, rendered top-down once per map (texture unit 8)."""
@@ -467,7 +482,7 @@ class RSVRenderer:
         self.ctx.enable(moderngl.BLEND)
         self._turf_map = self.map_name
 
-    def _render_grass(self, vp, camera_pos, tnow, cst, cfw, n_casters, ball_mark):
+    def _render_grass(self, vp, camera_pos, tnow, cst, cfw, cf3, cu3, n_casters, ball_mark):
         level = int(getattr(self.config, "gfx_grass", 2))
         if level <= 0 or self.map_name == "space" or "grass" in _SKIP:
             return
@@ -476,14 +491,27 @@ class RSVRenderer:
             self._bake_turf()
             self.render_target.use()
         cx, cy, cz = float(camera_pos[0]), float(camera_pos[1]), float(camera_pos[2])
-        # distance from the camera to each tile's nearest point on the floor
+        # distance from the camera to each tile's nearest point on the floor. Only the tile rows/columns within `far`
+        # of the camera are looked at (a slice of the tile grid, not all ~4800 tiles): ~3x less numpy work per frame
         h = self.GRASS_TILE / 2
-        dx = np.maximum(np.abs(self._grass_ctr[:, 0] - cx) - h, 0.0)
-        dy = np.maximum(np.abs(self._grass_ctr[:, 1] - cy) - h, 0.0)
-        dmin = np.sqrt(dx * dx + dy * dy + cz * cz)
-        sel = dmin < far
-        if not sel.any():
+        T = self.GRASS_TILE
+        ncol = self._grass_ncol
+        c0 = max(0, int((cx - far + 3840.0) // T)); c1 = min(ncol, int((cx + far + 3840.0) // T) + 1)
+        r0 = max(0, int((cy - far + 4864.0) // T)); r1 = min(self._grass_nrow, int((cy + far + 4864.0) // T) + 1)
+        if c0 >= c1 or r0 >= r1:
             return
+        win = (np.arange(r0, r1)[:, None] * ncol + np.arange(c0, c1)[None, :]).ravel()
+        ctr_w = self._grass_ctr[win]
+        dx = np.maximum(np.abs(ctr_w[:, 0] - cx) - h, 0.0)
+        dy = np.maximum(np.abs(ctr_w[:, 1] - cy) - h, 0.0)
+        dmin_w = np.sqrt(dx * dx + dy * dy + cz * cz)
+        sel_w = dmin_w < far
+        if not sel_w.any():
+            return
+        dmin = np.full(len(self._grass_tiles), 1e9)
+        dmin[win] = dmin_w
+        sel = np.zeros(len(self._grass_tiles), bool)
+        sel[win] = sel_w
         # view frustum (planes of the column-convention matrix M = vp^T), tile bounding sphere r = half diagonal
         M = np.asarray(vp, "f8").reshape(4, 4).T
         ctr = self._grass_ctr[sel]
@@ -506,9 +534,12 @@ class RSVRenderer:
         pg["bladeH"].value = bh
         pg["casters"].write(cst.tobytes())
         pg["casterFwd"].write(cfw.tobytes())
+        pg["casterF3"].write(cf3.tobytes())
+        pg["casterU3"].write(cu3.tobytes())
         pg["nCasters"].value = n_casters
         pg["ballMark"].value = ball_mark
         self._turf_tex.use(location=8)
+        self._pad_mask.use(location=9)
         self.ctx.disable(moderngl.CULL_FACE)
         # blade-count buckets: each tile drawn with the smallest bucket that covers the blades it wants (<= 2x waste)
         lo = dens
@@ -1702,6 +1733,7 @@ class RSVRenderer:
     SPEED_LINE_RATE = 7.0            # new lines per second at full supersonic
 
     def _update_speed_lines(self, state, interp_ratio, spectated):
+        return                                    # replaced by the 2D lines of render_supersonic_streaks
         lines = self.__dict__.setdefault("_speed_lines", [])
         now = time.time()
         dt = max(0.0, min(0.1, now - getattr(self, "_sl_last", now)))
@@ -1750,141 +1782,65 @@ class RSVRenderer:
             return None
         return ((clip[0] / clip[3] * 0.5 + 0.5) * width, (0.5 - clip[1] / clip[3] * 0.5) * height)
 
+    SS_BURST_S = 0.9                 # the strong first moments after the car becomes supersonic
+    SS_BASE_RATE = 2.6               # lines per second afterwards (rare)
+
     def render_supersonic_streaks(self, width, height, intensity, t, foe=None):
-        """A FIXED number of long, thin white DARTS that live a DESYNCED animated lifecycle: each
-        fades IN at a random perimeter spot, grows to full size, then fades OUT and RESPAWNS
-        somewhere else — never overlapping a live neighbour. Per-dart random lifespan (0.3-0.8s) so
-        they are NOT in sync. Every dart aims at the screen CENTRE (w/2, h/2) with a very narrow
-        ~3 deg apex (long slivers). Sizes derive from window dims -> scales with the window.
-
-        Called EVERY frame with a target `intensity` (0 when not supersonic). A smoothed global
-        activation eases toward that target, so the whole ring fades IN on supersonic entry and OUT
-        on exit instead of being hard-cut. State persists on self across frames."""
-        # ---- smoothed global activation (eases the ring IN/OUT on supersonic entry/exit) ----
-        target = float(np.clip(intensity, 0.0, 1.0))
+        """Supersonic speed lines, drawn in 2D but laid out like 3D: thin straight lines radiating from the point the car
+        is heading to (the vanishing point of its velocity), sliding outward and growing the way something passing by in
+        3D would. No fades: a line is at one steady brightness for its short life and simply appears / disappears.
+        Right after the car turns supersonic there is a burst of them (like RL's), then only a few faint ones."""
         now = float(t)
-        dt = max(0.0, min(0.1, now - getattr(self, "_ss_last_t", now)))
-        self._ss_last_t = now
-        act = getattr(self, "_ss_activation", 0.0)
-        if dt > 0.0:
-            act += (target - act) * (1.0 - math.exp(-dt / 0.18))   # 0.18s ease time-constant
-        self._ss_activation = act
-        if act <= 0.01 and target <= 0.0:
+        st = self.__dict__.setdefault("_ssl", {"lines": [], "on": False, "t0": 0.0, "acc": 0.0, "last": now})
+        dt = max(0.0, min(0.1, now - st["last"]))
+        st["last"] = now
+        on = intensity > 0.0
+        if not on:
+            st["lines"] = []
+            st["on"] = False
             return
-        eff = act                                        # eased effective intensity
-
+        if not st["on"]:
+            st["on"] = True
+            st["t0"] = now
+        cx, cy = foe if foe is not None else (width * 0.5, height * 0.5)
+        md = float(min(width, height))
+        burst = max(0.0, 1.0 - (now - st["t0"]) / self.SS_BURST_S)
+        st["acc"] += dt * (self.SS_BASE_RATE + 46.0 * burst * burst)
+        alpha = 0.16 + 0.42 * burst
+        lines = st["lines"]
+        while st["acc"] >= 1.0 and len(lines) < 60:
+            st["acc"] -= 1.0
+            lines.append([random.uniform(0.0, 2.0 * math.pi), md * random.uniform(0.09, 0.34),
+                          md * random.uniform(0.13, 0.30), now, random.uniform(0.22, 0.42), alpha,
+                          random.uniform(0.9, 1.5)])
+        st["acc"] = min(st["acc"], 1.0)
+        keep, verts = [], []
+        px = md / 1080.0
+        for ln in lines:
+            ang, r0, L0, t0, life, a0, wpx = ln
+            age = now - t0
+            if age >= life:
+                continue
+            keep.append(ln)
+            g = math.exp(1.7 * age)                       # perspective: things move out from the vanishing point faster the farther out
+            r_in, L = r0 * g, L0 * g
+            dx, dy = math.cos(ang), math.sin(ang)
+            x0, y0 = cx + dx * r_in, cy + dy * r_in
+            x1, y1 = cx + dx * (r_in + L), cy + dy * (r_in + L)
+            w0, w1 = 0.4 * wpx * px, wpx * px * (0.8 + 0.8 * min(1.0, (r_in + L) / md))
+            nx, ny = -dy, dx
+            for (x, y) in ((x0 + nx * w0, y0 + ny * w0), (x0 - nx * w0, y0 - ny * w0), (x1 + nx * w1, y1 + ny * w1),
+                           (x0 - nx * w0, y0 - ny * w0), (x1 - nx * w1, y1 - ny * w1), (x1 + nx * w1, y1 + ny * w1)):
+                verts.append((x, y, 0.0, 1.0, 1.0, 1.0, a0))
+        st["lines"] = keep
+        if not verts:
+            return
         ortho = Matrix44.orthogonal_projection(0.0, width, height, 0.0, -1.0, 1.0)
         self._hud_ortho = ortho
         self.pr_m_vp.write(ortho.astype('f4'))
-
         self.ctx.disable(moderngl.DEPTH_TEST)
         self.ctx.disable(moderngl.CULL_FACE)
-
-        min_dim = min(width, height)
-        # darts aim at where the car is HEADING (its velocity's vanishing point on screen), so they line up with
-        # its motion like 3D streaks at 2D cost; the screen centre if that point is unknown
-        cx, cy = foe if foe is not None else (width * 0.5, height * 0.5)
-        N = 10                                          # fixed dart count on screen (rarer)
-        dart_len = min_dim * 0.20                        # long
-        min_gap = max(dart_len * 0.55, min_dim * 0.085)  # min perimeter distance between live darts
-
-        # Perimeter parametrisation: s in [0, P) walks the border top->right->bottom->left.
-        P = 2.0 * (width + height)
-
-        def s_to_xy(s):
-            s = s % P
-            if s < width:
-                return (s, 0.0)                          # top edge
-            s -= width
-            if s < height:
-                return (width, s)                        # right edge
-            s -= height
-            if s < width:
-                return (width - s, height)               # bottom edge
-            s -= width
-            return (0.0, height - s)                      # left edge
-
-        def s_dist(a, b):
-            d = abs(a - b) % P
-            return min(d, P - d)
-
-        def _new_period():
-            return random.uniform(0.3, 0.8)              # per-dart random lifespan -> desynced
-
-        def _new_half_angle():
-            return math.tan(math.radians(random.uniform(0.75, 1.0)))   # per-dart HALF-angle 0.75-1.0deg
-            #   (apex TOTAL 1.5-2.0deg) -> darts read as slightly different thicknesses, not uniform.
-
-        def _new_opacity():
-            return random.uniform(0.18, 0.38)            # per-dart random opacity (faint), re-rolled on respawn
-
-        # Lazy/persistent init. Re-seed if the count or the window perimeter changed (resize).
-        # dart record: [s_pos, birth, period, half_w_ratio, opacity_mult]
-        st = getattr(self, "_ss_darts", None)
-        if st is None or len(st) != N or getattr(self, "_ss_P", -1.0) != round(P):
-            st = []
-            for i in range(N):
-                per = _new_period()
-                st.append([(P * i / N + random.uniform(0.0, P / N * 0.5)) % P,   # spread out
-                           now - random.uniform(0.0, per),                       # desync each phase
-                           per, _new_half_angle(), _new_opacity()])
-            self._ss_darts = st
-            self._ss_P = round(P)
-
-        # Per-dart draw calls (this pipeline only supports one uniform color per _hud_draw call, so a
-        # shared opacity across all darts isn't possible without per-vertex color -- 24 tiny draws/frame
-        # is negligible cost).
-        darts_out = []
-        for d in st:
-            s_pos, birth, period, half_w_ratio, op_mult = d
-            p = (now - birth) / period
-            if p >= 1.0:
-                # Respawn: pick a fresh spot at least min_gap (perimeter distance) from every other
-                # dart, and fresh randomised lifespan/angle/opacity so they stay desynced & varied.
-                others = [o[0] for o in st if o is not d]
-                new_s = None
-                for _ in range(24):
-                    cand = random.uniform(0.0, P)
-                    if all(s_dist(cand, os) > min_gap for os in others):
-                        new_s = cand
-                        break
-                d[0] = new_s if new_s is not None else random.uniform(0.0, P)
-                d[1] = now
-                d[2] = _new_period()
-                d[3] = half_w_ratio = _new_half_angle()
-                d[4] = op_mult = _new_opacity()
-                s_pos, birth, period = d[0], d[1], d[2]
-                p = 0.0
-
-            # Per-dart size envelope: ONE continuous smooth in->out motion (grow to full at mid-life,
-            # shrink back). sin(pi*p) is 0 at birth, 1 at p=0.5, 0 at death. Multiplied by the eased
-            # global activation `eff` so the whole ring also fades smoothly on supersonic entry/exit.
-            env = math.sin(math.pi * max(0.0, min(1.0, p)))
-            scale = env * eff
-            if scale <= 0.02:
-                continue
-
-            px, py = s_to_xy(s_pos)
-            dx, dy = cx - px, cy - py
-            dd = math.hypot(dx, dy)
-            if dd < 1e-6:
-                continue
-            ux, uy = dx / dd, dy / dd                     # unit aim direction -> screen centre
-            L = dart_len * scale
-            half_w = L * half_w_ratio
-            ax, ay = px + ux * L, py + uy * L             # apex reaches in toward centre
-            perp_x, perp_y = -uy, ux                       # base perpendicular to the aim direction
-            dart_verts = [
-                (px + perp_x * half_w, py + perp_y * half_w, 0.0),
-                (px - perp_x * half_w, py - perp_y * half_w, 0.0),
-                (ax, ay, 0.0),
-            ]
-            a_ = op_mult * eff
-            for vx_, vy_, vz_ in dart_verts:
-                darts_out.append((vx_, vy_, vz_, 1.0, 1.0, 1.0, a_))
-        self._hud_ortho = ortho
-        self._hud_draw_tris(np.asarray(darts_out, dtype="f4") if darts_out else None)
-
+        self._hud_draw_tris(np.asarray(verts, dtype="f4"))
         self.ctx.enable(moderngl.DEPTH_TEST)
         self.ctx.enable(moderngl.CULL_FACE)
 
@@ -2171,6 +2127,20 @@ class RSVRenderer:
             to_goal = safe_normalize(Vector3(self._cel_last) - pos)
             wgt = self._cel_w * self._cel_w * (3.0 - 2.0 * self._cel_w)
             cam_dir = safe_normalize(cam_dir * (1.0 - wgt) + to_goal * wgt)
+        # RL rolls the camera with the surface the car is driving on (on a wall or the ceiling the wall is "down"),
+        # easing back to upright when the car leaves it
+        want_up = Vector3((0.0, 0.0, 1.0))
+        if is_spectating_car and os.environ.get("RSV_CAM_ROLL", "1") != "0":
+            cs_ = state.car_states[self.spectate_idx]
+            up_ = cs_.phys.get_up(interp_ratio)
+            if bool(cs_.on_ground) and float(up_[2]) < 0.8:
+                want_up = safe_normalize(Vector3(up_))
+        prev_up = getattr(self, "_cam_up", None)
+        if prev_up is None:
+            self._cam_up = want_up
+        else:
+            k_ = 1.0 - math.exp(-delta_time / 0.30)
+            self._cam_up = safe_normalize(prev_up + (want_up - prev_up) * k_)
         return pos, pos + cam_dir, vfov
 
     def auto_cam_enabled(self):
@@ -2201,8 +2171,9 @@ class RSVRenderer:
         # Kickoff (ball parked at centre field): follow a RANDOM car until the ball is first touched,
         # instead of whoever happens to be closest.
         bp = state.ball_state.next_pos
-        at_kickoff = (abs(float(bp[0])) < 5 and abs(float(bp[1])) < 5 and float(bp[2]) < 100
-                      and state.ball_state.next_vel.length < 1.0)
+        # (a ball parked out of play during a goal celebration is NOT a kickoff: it sits at 0,0 too)
+        at_kickoff = (abs(float(bp[0])) < 5 and abs(float(bp[1])) < 5 and 50 < float(bp[2]) < 100
+                      and state.ball_state.next_vel.length < 1.0 and not getattr(state, "ball_hidden", False))
         if at_kickoff:
             if not getattr(self, "_kickoff_pick_done", False):
                 active_idx = [i for i, cs in enumerate(state.car_states) if not cs.is_demoed]
@@ -2418,7 +2389,9 @@ class RSVRenderer:
         camera_pos, camera_target_pos, camera_fov = self.calc_camera_state(state, interp_ratio, delta_time)
         # near 10 uu (not 1): 10x the depth precision far out -- distant trims no longer z-fight (flicker)
         proj = Matrix44.perspective_projection(camera_fov, -width/height, 10.0, 120 * 1000.0)
-        lookat = Matrix44(fastvec.look_at(camera_pos, camera_target_pos, (0.0, 0.0, 1.0)))
+        cu_ = getattr(self, "_cam_up", None)
+        cu_ = (0.0, 0.0, 1.0) if cu_ is None else (float(cu_[0]), float(cu_[1]), float(cu_[2]))
+        lookat = Matrix44(fastvec.look_at(camera_pos, camera_target_pos, cu_))
         vp = (proj * lookat).astype('f4')
         vp_bytes = vp.tobytes()
         self._frame_vp, self._frame_cam = vp, camera_pos
@@ -2542,6 +2515,8 @@ class RSVRenderer:
         _c0 = time.perf_counter() if PERF else 0.0
         casters = [] if getattr(state, "ball_hidden", False) else [(ball_pos[0], ball_pos[1], ball_pos[2], 98.0)]
         caster_fwd = [(0.0, 0.0)]
+        caster_f3 = [(0.0, 0.0, 0.0)]
+        caster_u3 = [(0.0, 0.0, 1.0)]
         boosting = {}
         now = time.time()
         for i, car_state in enumerate(state.car_states):
@@ -2576,6 +2551,8 @@ class RSVRenderer:
                 f2 = f2 / max(f2.length, 1e-4)
                 casters.append((car_pos[0], car_pos[1], car_pos[2], 72.0))
                 caster_fwd.append((f2[0], f2[1]))
+                caster_f3.append((float(car_forward[0]), float(car_forward[1]), float(car_forward[2])))
+                caster_u3.append((float(car_up[0]), float(car_up[1]), float(car_up[2])))
 
             if car_state.is_boosting:
                 self.fx.boost(i, tuple(car_pos), tuple(car_forward), tuple(car_up), tuple(car_vel), team, delta_time,
@@ -2599,11 +2576,10 @@ class RSVRenderer:
                     if car_state.phys.is_teleporting():
                         rib.points.clear()
                     if len(rib.points) > 1:
-                        # team-coloured, like RL: a wide soft glow + a bright narrow core so it reads clearly
-                        # ONE team colour: an upright jagged flame wall + a faint flat streak on the surface
-                        tc = (0.25, 0.55, 1.0) if int(team) == 0 else (1.0, 0.50, 0.10)
-                        self.fx.add_trail(rib, 0.30, 5.0, (*tc, 0.45))
-                        self.fx.add_trail(rib, 0.30, 26.0, (*tc, 0.95), up=tuple(car_up))
+                        # RL's supersonic trail: a thin white pinstripe off each rear wheel with white speckle along
+                        # it; the same for both teams
+                        self.fx.add_trail(rib, 0.30, 1.5, (1.0, 1.0, 1.0, 0.85))
+                        self.fx.sparkle((i, k), tuple(emit), delta_time)
         self.ctx.enable(moderngl.CULL_FACE)
         self.audio.update_boost(boosting)
         eng = None
@@ -2626,8 +2602,12 @@ class RSVRenderer:
         _a0 = time.perf_counter() if PERF else 0.0
         cst = np.zeros((9, 4), "f4"); cfw = np.zeros((9, 2), "f4")
         cst[:len(casters)] = casters; cfw[:len(caster_fwd)] = caster_fwd
+        cf3 = np.zeros((9, 3), "f4"); cu3 = np.zeros((9, 3), "f4"); cu3[:, 2] = 1.0
+        cf3[:len(caster_f3)] = caster_f3; cu3[:len(caster_u3)] = caster_u3
         self.prog_rl_arena["casters"].write(cst.tobytes())
         self.prog_rl_arena["casterFwd"].write(cfw.tobytes())
+        self.prog_rl_arena["casterF3"].write(cf3.tobytes())
+        self.prog_rl_arena["casterU3"].write(cu3.tobytes())
         self.prog_rl_arena["nCasters"].value = len(casters)
         self.prog_rl_arena["ballMark"].value = self._ball_mark(state, ball_pos)
         self.render_target.use()
@@ -2639,7 +2619,7 @@ class RSVRenderer:
             self._space_cube.use(location=6)
         if "arena" not in _SKIP:
             self.vaos['ArenaMeshCustom.obj'].render(moderngl.TRIANGLES)
-        self._render_grass(vp, camera_pos, tnow, cst, cfw, len(casters), self.prog_rl_arena["ballMark"].value)
+        self._render_grass(vp, camera_pos, tnow, cst, cfw, cf3, cu3, len(casters), self.prog_rl_arena["ballMark"].value)
         # Draw order is for overdraw: everything opaque first, so the depth test rejects the hidden
         # parts of the stadium and the sky only shades the pixels nothing else covered.
         self.ctx.disable(moderngl.CULL_FACE)
@@ -2799,7 +2779,7 @@ class RSVRenderer:
             if teleported:
                 rib.points.clear()
             if len(rib.points) > 1:
-                self.fx.add_trail(rib, self.FLIP_STREAK_LIFE, 0.9, (1.0, 1.0, 1.0, 0.15))
+                self.fx.add_trail(rib, self.FLIP_STREAK_LIFE, 0.9, (1.0, 1.0, 1.0, 0.12))
         if not flipping and not any(r.points for r in ribs):
             del self._corner_ribs[i]
 
@@ -2951,13 +2931,17 @@ class RSVRenderer:
 
     def render_hud(self, state, interp_ratio, spectated, total_time, width, height):
         ss_target = 0.0
+        foe = None
         if spectated >= 0:
             spectated_car = state.car_states[spectated]
             if not spectated_car.is_demoed:
-                speed = spectated_car.phys.get_vel(interp_ratio).length
+                vel_ = spectated_car.phys.get_vel(interp_ratio)
+                speed = vel_.length
                 if speed >= self.SUPERSONIC_SPEED:
-                    ss_target = float(np.clip((speed - self.SUPERSONIC_SPEED) / 200.0, 0.0, 1.0)) * 0.5 + 0.5
+                    ss_target = 1.0
+                    foe = self._heading_point(vel_, width, height)
                 self.render_boost_hud(width, height, spectated_car.boost_amount, spectated_car.team_num)
+        self.render_supersonic_streaks(width, height, ss_target, time.time(), foe)
         self.render_pai_hud(width, height, getattr(state_manager, "gail_hud", None))
         self.render_scoreboard_hud(width, height, getattr(state_manager, "scoreboard", None))
         self.render_goal_banner(width, height, state)
@@ -3403,7 +3387,8 @@ def main():
     fps = refresh if fps_env <= 0 else min(refresh, fps_env)
     frame_ms = int(os.environ.get("RSV_FRAME_MS", max(1, int(1000.0 / max(1.0, fps)))))
     print("[timing] monitor {:.0f} Hz -> frame interval {} ms".format(refresh, frame_ms), flush=True)
-    gl_widget.pacer = FramePacer(refresh)
+    if os.environ.get("RSV_PACER") == "1":        # off by default: half-rate locking cost more fps than it saved in jitter
+        gl_widget.pacer = FramePacer(refresh)
     # Frame-time spikes: (1) while training runs, its collection threads keep every core busy and the render thread
     # had to wait its turn at normal priority -> above normal (it uses the same CPU time, just on time); (2) every
     # startup object (meshes' Python wrappers, modules, caches) was rescanned by each full GC pass (~20 ms) -> frozen.

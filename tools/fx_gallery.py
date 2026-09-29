@@ -69,7 +69,10 @@ def run(name, eye, target, ball, cars, ev, ages, spectate=0):
     t0 = time.time()
     if ev is not None:
         ev = dict(ev); ev["t"] = t0
-        r._handle_event(ev, spectate)
+        if ev.get('kind') == 'fxsparks':
+            r.fx.sparks(ev['pos'], ev['normal'], ev['strength'])
+        else:
+            r._handle_event(ev, spectate)
     shots = []
     for a in ages:
         while time.time() - t0 < a:
@@ -100,6 +103,9 @@ run("demo", eye=(-900.0, -900.0, 350.0), target=(0.0, 0.0, 80.0), ball=(0.0, 150
 # goal
 run("goal", eye=(0.0, 3500.0, 600.0), target=(0.0, 5300.0, 250.0), ball=(0.0, 5300.0, 250.0), cars=[],
     ev={"kind": "goal", "pos": (0.0, 5300.0, 250.0), "team": 0}, ages=[0.05, 0.2, 0.45, 0.9], spectate=-1)
+# a hit on the ball (sparks)
+run("hit", eye=(-300.0, -220.0, 150.0), target=(0.0, 0.0, 100.0), ball=(0.0, 0.0, 93.0), cars=[car(0, (-95.0, 0.0, 17.0), fwd=(1, 0, 0))],
+    ev={"kind": "fxsparks", "pos": (-74.0, -55.0, 93.0), "normal": (-0.8, -0.6, 0.1), "strength": 900.0}, ages=[0.02, 0.05, 0.09, 0.14], spectate=-1)
 # boost flame close-up
 run("boost", eye=(-260.0, -250.0, 90.0), target=(0.0, 0.0, 40.0), ball=(0.0, 1500.0, 93.0),
     cars=[car(1, (0.0, 0.0, 17.0), boosting=True)], ev=None, ages=[0.1, 0.25, 0.4, 0.55])

@@ -58,6 +58,8 @@ vec3 to_srgb(vec3 c) {
 CASTERS = '''
 uniform vec4 casters[9];
 uniform vec2 casterFwd[9];
+uniform vec3 casterF3[9];      // car forward / up (3D), for the contact occlusion
+uniform vec3 casterU3[9];
 uniform int nCasters;
 float sdRoundBox(vec2 p, vec2 b, float r) {
     vec2 q = abs(p) - b + r;
@@ -79,37 +81,48 @@ float shadowAt(vec3 p) {
     }
     return sh;
 }
-// Contact occlusion: the dark, tight patch right under a car (its hitbox footprint) or a ball resting on the floor,
-// darkening the AMBIENT light too (the soft sun shadow alone left the floor under a car fully sky-lit, which read as
-// the car hovering). Fades out within ~70 uu of lift, so it only shows while the body is actually near the floor.
+// Contact occlusion, in 3D: how close a surface point is to the car's real oriented hitbox (or to the ball's sphere), so
+// it works on the floor, the floor-wall curves and the walls, follows the car's orientation (an upside-down or tilted
+// car shades what is actually under it) and vanishes as the body lifts away. Darkens sky/ambient light only.
 float contactAO(vec3 p) {
     float ao = 0.0;
     for (int i = 0; i < nCasters; i++) {
-        vec4 c = casters[i];
-        float h = c.z - p.z;
-        if (h < -20.0 || h > 260.0) continue;
-        vec2 d = p.xy - c.xy;
-        vec2 f = casterFwd[i];
+        vec3 d = p - casters[i].xyz;
+        if (dot(d, d) > 250.0 * 250.0) continue;
         float o;
-        if (dot(f, f) > 0.0) {                                  // car: Octane hitbox 120 x 85, centre ~17 uu up
-            vec2 q = vec2(dot(d, f), dot(d, vec2(-f.y, f.x)));
-            float sd = sdRoundBox(q - vec2(10.0, 0.0), vec2(64.0, 44.0), 26.0);
-            float lift = max(h - 17.0, 0.0);
-            float fade = 1.0 - smoothstep(0.0, 70.0, lift);
-            // soft skirt reaching ~40 uu out past the body (sky blocked by the car), dark core under the floor pan
-            o = (1.0 - smoothstep(-24.0, 40.0 + 0.5 * lift, sd)) * (0.78 - 0.30 * smoothstep(-40.0, 10.0, sd));
-            // the four tyre contact patches (RocketSim Octane wheel positions, front r 12.5 / rear r 15)
-            float df = length(vec2(q.x - 51.25, abs(q.y) - 25.9)) - 6.0;
-            float db = length(vec2(q.x + 33.75, abs(q.y) - 29.5)) - 7.0;
-            o = max(o, 0.9 * (1.0 - smoothstep(0.0, 20.0, min(df, db))));
-            o *= fade;
-        } else {                                                // ball: a small dark core where it sits
-            float lift = max(h - 92.75, 0.0);
-            o = (1.0 - smoothstep(0.0, 62.0 + 0.6 * lift, length(d))) * (1.0 - smoothstep(0.0, 90.0, lift)) * 0.6;
+        if (dot(casterFwd[i], casterFwd[i]) > 0.0) {            // car: Octane hitbox 118 x 84 x 36, centre (13.9, 0, 20.75) from the origin
+            vec3 F = casterF3[i], U = casterU3[i];
+            vec3 R = cross(U, F);
+            vec3 q = vec3(dot(d, F) - 13.88, dot(d, R), dot(d, U) - 20.75);
+            vec3 e = abs(q) - vec3(59.0, 42.0, 18.0);
+            float sd = length(max(e, 0.0)) + min(max(e.x, max(e.y, e.z)), 0.0);
+            o = pow(1.0 - smoothstep(2.0, 95.0, sd), 1.6) * 0.62;
+        } else {                                                // ball
+            float sd = length(d) - 92.75;
+            o = pow(1.0 - smoothstep(0.0, 70.0, sd), 2.0) * 0.55;
         }
         ao = max(ao, o);
     }
     return ao;
+}
+// Coverage of a line of half-width w (world units) at distance d, for a pixel whose footprint ACROSS the line is
+// g world units. Energy-preserving: once the line is thinner than a pixel it keeps a one-pixel width and fades by
+// w / w' instead of getting fatter.
+float lineCov(float d, float w, float g) {
+    float we = max(w, 0.5 * g);
+    return clamp((we - abs(d)) / g + 0.5, 0.0, 1.0) * (w / we);
+}
+// RL's ball marker, inner piece, for a point d (uu) from the ball's x/y: a ring split into 4 by a cross whose gaps
+// are ALWAYS the same width; only the ring's size changes with the ball's height t (0 = on the ground .. 1 = high),
+// growing thicker as it shrinks until it is a small solid disc. g = pixel footprint (uu) for anti-aliasing.
+float markInner(vec2 d, float t, float g) {
+    float Ro = 91.25 * mix(0.80, 0.33, t) + mix(2.4, 3.0, t);
+    float th = mix(4.8, Ro, smoothstep(0.55, 1.0, t));
+    float r = length(d);
+    float ring = clamp((Ro - r) / g + 0.5, 0.0, 1.0) * clamp((r - (Ro - th)) / g + 0.5, 0.0, 1.0);
+    const float GAP = 3.4;                                      // half gap width (uu), fixed
+    float gaps = clamp((min(abs(d.x), abs(d.y)) - GAP) / g + 0.5, 0.0, 1.0);
+    return ring * gaps;
 }
 '''
 
@@ -185,31 +198,15 @@ float footprint(vec2 p) {
 // outer ring on the ball's x/y, and an inner ring of 4 arcs that is almost as big as the outer one when the
 // ball is on the ground and shrinks (arcs shortening) as it rises, down to 4 dots by ~half the ceiling height.
 // The two never touch. Derivatives are taken before any masking (no divergent fwidth).
-// Coverage of a line of half-width w (world units) at distance d, for a pixel whose footprint ACROSS the line is
-// g world units. Energy-preserving: once the line is thinner than a pixel it keeps a one-pixel width and fades by
-// w / w' instead of getting fatter -- widening it (the old max(w, fw)) turned a far or grazing-angle ring into a
-// thick blotchy band, fattest where the ellipse runs across the view.
-float lineCov(float d, float w, float g) {
-    float we = max(w, 0.5 * g);
-    return clamp((we - abs(d)) / g + 0.5, 0.0, 1.0) * (w / we);
-}
 float ballMarkAt(vec3 p, vec3 n) {
     vec2 d = p.xy - ballMark.xy;
     float r = length(d);
     float t = clamp(ballMark.w, 0.0, 1.0);
     const float RO = 91.25;                                       // the outer ring = the ball's size
-    // pixel footprint along the ring's normal (its true screen-space gradient length; fwidth = |dx|+|dy|
-    // overestimates it up to 1.4x on diagonals, which showed as uneven ring thickness)
+    // pixel footprint along the ring's normal (true screen-space gradient length)
     float gr = max(length(vec2(dFdx(r), dFdy(r))), 1e-3);
     float outer = lineCov(r - RO, 2.4, gr);
-    float ri = RO * mix(0.80, 0.33, t);
-    float hs = 0.72 * pow(1.0 - t, 0.8);                         // half angle of each arc (rad)
-    float a = atan(d.y, d.x) - 0.78539816;                        // arcs centred on the diagonals
-    float dl = a - floor(a / 1.5707963 + 0.5) * 1.5707963;
-    float ang = a - dl + clamp(dl, -hs, hs) + 0.78539816;
-    float di = length(d - ri * vec2(cos(ang), sin(ang)));
-    float gi = max(length(vec2(dFdx(di), dFdy(di))), 1e-3);
-    float inner = lineCov(di, mix(2.4, 3.6, t), gi);              // the dots a bit fatter than the line
+    float inner = markInner(d, t, gr);
     // any surface facing up at all (floor, the whole floor-wall curve up to where it turns vertical), not above
     // the ball's top: a ball resting against the wall projects onto the curve higher than its centre
     float on = step(0.0, ballMark.w) * step(p.z, ballMark.z + 91.25) * step(0.03, n.z) * step(r, 120.0);
@@ -443,7 +440,7 @@ void main() {
     float ndl = max(dot(n, SUN_DIR), 0.0);
     vec3 amb = mix(vec3(0.12, 0.11, 0.12), vec3(0.42, 0.40, 0.46), n.z * 0.5 + 0.5) * uAmb;
     float sh = grid ? shadowAt(p) : 0.0;
-    float ao = grid ? contactAO(p) : 0.0;
+    float ao = (passMode == 0 && (grid || ramp)) ? contactAO(p) : 0.0;
     vec3 lit = col * (amb * 1.25 + SUN_COL * ndl * 0.75 * (1.0 - sh)) * (1.0 - ao);
     vec3 H = normalize(SUN_DIR + V);
     lit += SUN_COL * spec * pow(max(dot(n, H), 0.0), 30.0) * (1.0 - sh);
@@ -474,6 +471,7 @@ uniform float farD;         // no blades past this
 uniform float bladeH;       // mean blade height (uu)
 uniform vec4 ballMark;      // as the arena shader: ball x, y, centre z, height factor (< 0 = off)
 uniform sampler2D albedoTex;
+uniform sampler2D padMask;  // 1 = grass, 0 = a boost pad's footprint
 in vec2 i_tile;             // tile min corner
 out vec3 v_col;
 out vec3 v_nrm;
@@ -487,15 +485,8 @@ float markRoot(vec2 q) {                    // RL ball marker at a blade root (n
     vec2 d = q - ballMark.xy;
     float r = length(d);
     if (r > 100.0) return 0.0;
-    float t = clamp(ballMark.w, 0.0, 1.0);
     float outer = step(abs(r - 91.25), 3.2);
-    float ri = 91.25 * mix(0.80, 0.33, t);
-    float hs = 0.72 * pow(1.0 - t, 0.8);
-    float a = atan(d.y, d.x) - 0.78539816;
-    float dl = a - floor(a / 1.5707963 + 0.5) * 1.5707963;
-    float ang = a - dl + clamp(dl, -hs, hs) + 0.78539816;
-    float inner = step(length(d - ri * vec2(cos(ang), sin(ang))), mix(3.2, 4.4, t));
-    return max(outer, inner);
+    return max(outer, step(0.5, markInner(d, clamp(ballMark.w, 0.0, 1.0), 1.5)));
 }
 
 void main() {
@@ -511,6 +502,7 @@ void main() {
     // only on the turf the floor shader keeps (its cut where the ramps start), a little inside it
     float inner = max(max(abs(root.x) - 3760.0, abs(root.y) - 4880.0), (abs(root.x) + abs(root.y) - 8064.0) * 0.7071 + 330.0);
     keep *= 1.0 - smoothstep(-40.0, -10.0, inner);
+    keep *= smoothstep(0.25, 0.75, textureLod(padMask, root / vec2(8400.0, 10400.0) + 0.5, 0.0).r);
 
     float r1 = hash1(root * 1.37 + 0.1), r2 = hash1(root * 2.11 + 7.0), r3 = hash1(root * 0.73 + 3.0);
     float h = bladeH * (0.55 + 0.9 * r1 * r1) * keep;
@@ -537,7 +529,7 @@ void main() {
     vec2 across = vec2(-side.y, side.x);
     float wind = sin(time * 1.6 + root.x * 0.004 + root.y * 0.006) * 0.5 + sin(time * 2.9 + root.y * 0.011) * 0.25;
     vec2 lean = across * (r3 - 0.5) * 1.1 + vec2(0.6, 0.35) * wind * 0.35;
-    float w = 0.55 + 0.5 * r3;
+    float w = (0.55 + 0.5 * r3) * (1.0 + d / 450.0);          // farther blades are wider: the same coverage from fewer blades
     vec3 tip = vec3(root + lean * h, h * (1.0 - 0.25 * dot(lean, lean)));
     vec3 P = k == 2 ? tip : vec3(root + side * w * (k == 0 ? -0.5 : 0.5), 0.0);
     v_pos = P;
