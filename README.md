@@ -1,4 +1,4 @@
-# BeautifulSim
+# BeautifulVis
 
 A Rocket League-style 3D visualizer for bots trained with [RocketSim](https://github.com/ZealanL/RocketSim)
 (GigaLearnCPP, rlgym-sim / RLGym-PPO, or anything that can send JSON over UDP).
