@@ -68,7 +68,7 @@ float sdRoundBox(vec2 p, vec2 b, float r) {
 // Signed distance from world point w to caster i (car: its oriented hitbox, rounded a little; ball: its sphere).
 float casterSD(int i, vec3 w) {
     vec3 d = w - casters[i].xyz;
-    if (dot(casterFwd[i], casterFwd[i]) > 0.0) {
+    if (casters[i].w < 80.0) {
         vec3 F = casterF3[i], U = casterU3[i];
         vec3 R = cross(U, F);
         vec3 q = vec3(dot(d, F) - 13.88, dot(d, R), dot(d, U) - 20.75);    // Octane hitbox centre offset
@@ -89,11 +89,23 @@ float shadowAt(vec3 p) {
         if (along < -60.0 || along > 1800.0) continue;
         vec3 w = p + L * along;                                          // the light ray's closest point to the caster
         if (dot(w - casters[i].xyz, w - casters[i].xyz) > 190.0 * 190.0) continue;
-        // one shape evaluation there: the caster's cross-section seen along the light = its outline (a car's
-        // footprint follows its orientation); the edge softens the higher the body is above the surface
-        float sd = casterSD(i, w);
-        float soft = 3.0 + along * 0.08;
-        float strength = dot(casterFwd[i], casterFwd[i]) > 0.0 ? 0.62 : 0.55;
+        // The ray's closest approach to the caster's SHAPE (not its centre): the distance to a convex shape is convex
+        // along a line, so a golden-section search over the stretch of the ray near the caster finds it. (One
+        // evaluation at the centre's closest point missed the ends of a tilted car -- its shadow shrank and broke.)
+        float a = max(along - 90.0, 0.0), b = max(along + 90.0, 1.0);   // only the ray ABOVE the surface
+        float x1 = b - 0.618 * (b - a), x2 = a + 0.618 * (b - a);
+        float f1 = casterSD(i, p + L * x1), f2 = casterSD(i, p + L * x2);
+        for (int k = 0; k < 6; k++) {
+            if (f1 < f2) { b = x2; x2 = x1; f2 = f1; x1 = b - 0.618 * (b - a); f1 = casterSD(i, p + L * x1); }
+            else         { a = x1; x1 = x2; f1 = f2; x2 = a + 0.618 * (b - a); f2 = casterSD(i, p + L * x2); }
+        }
+        // the caster's silhouette seen along the light = its outline (follows its orientation); the edge softens the
+        // higher the body is above the surface
+        float sd = min(f1, f2);
+        // (clamped: with `along` < 0 -- a surface point a little sun-ward of the caster -- the width went negative,
+        // the edge flipped, and every car threw a solid arc of shadow off to its side)
+        float soft = 3.0 + max(along, 0.0) * 0.08;
+        float strength = casters[i].w < 80.0 ? 0.80 : 0.70;
         sh = max(sh, (1.0 - smoothstep(-soft, soft, sd)) * strength * (1.0 - smoothstep(600.0, 1800.0, along)));
     }
     return sh;
@@ -277,7 +289,8 @@ void main() {
             const vec3 PAINT_B = vec3(0.012, 0.10, 0.78), PAINT_O = vec3(0.82, 0.16, 0.02);
             vec3 tc = q.y < 0.0 ? PAINT_B : PAINT_O;
             // saturation vs the deep paint: 0.65 on both halves (each raised +30% from 0.5, blue then orange)
-            tc = mix(vec3(dot(tc, vec3(0.2126, 0.7152, 0.0722))), tc, 0.65);
+            // (orange +20% on top: 0.78)
+            tc = mix(vec3(dot(tc, vec3(0.2126, 0.7152, 0.0722))), tc, q.y < 0.0 ? 0.65 : 0.78);
             float ax = abs(q.x), ay = abs(q.y), g = 5120.0 - ay, r = length(q);
             float fill = 0.0, dark = 0.0, white = 0.0, zone = 0.0;
             // 1) solid box in front of the goal (640 deep, +-1500) with dark ">" chevrons
@@ -384,9 +397,28 @@ void main() {
         // floor->wall curve in the colour of the team whose half it is (switches at the halfway line),
         // brighter toward its top edge, with a glowing rim like RL's arena boards
         vec3 rc = mix(vec3(0.012, 0.10, 0.78), vec3(0.82, 0.16, 0.02), smoothstep(-30.0, 30.0, p.y));
-        rc = mix(vec3(dot(rc, vec3(0.2126, 0.7152, 0.0722))), rc, 0.7);     // 30% less saturated
+        rc = mix(vec3(dot(rc, vec3(0.2126, 0.7152, 0.0722))), rc, 0.84);    // (0.7 before: +20% saturation)
         float h = clamp(p.z / 250.0, 0.0, 1.0);
-        col = rc * (0.55 + 0.35 * h) * (0.92 + 0.08 * step(0.5, fract(p.z / 55.0)));
+        // The mesh's curve is a few flat facets (and was striped every 55 uu): shade it as the real round fillet
+        // instead -- on a quarter circle of radius R the normal's height component is 1 - z/R, its horizontal part
+        // points out of the wall (the mesh normal's direction, which is smooth along the wall). One continuous
+        // gradient, no bands, no facets.
+        const float RF = 258.0;
+        float nz = clamp(1.0 - p.z / RF, 0.0, 1.0);
+        vec2 nxy = length(n.xy) > 1e-3 ? normalize(n.xy) : vec2(0.0);
+        // horizontal direction: the smooth blend of the nearest walls' normals (side / corner / back, softmax like the
+        // glass below) instead of the mesh's faceted one, where the two agree (not around the goal mouth)
+        {
+            vec2 ap = abs(p.xy);
+            float dS = ap.x - 4096.0, dB = ap.y - 5120.0, dC = (ap.x + ap.y - 8064.0) * 0.7071;
+            float dm = max(dS, max(dB, dC));
+            float wS = exp((dS - dm) / 200.0), wB = exp((dB - dm) / 200.0), wC = exp((dC - dm) / 200.0);
+            vec2 inw = -normalize(wS * vec2(1.0, 0.0) + wB * vec2(0.0, 1.0) + wC * vec2(0.7071, 0.7071))
+                       * vec2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+            nxy = normalize(mix(nxy, inw, smoothstep(0.80, 0.95, dot(nxy, inw))));
+        }
+        n = normalize(vec3(nxy * sqrt(max(1.0 - nz * nz, 0.0)), nz));
+        col = rc * (0.55 + 0.35 * smoothstep(0.0, 1.0, h));
         emis += rc * (0.10 + 0.25 * h) + mix(rc, vec3(1.0), 0.35) * 0.8 * aline(p.z - 244.0, 5.0);
         spec = 0.15;
     } else {
@@ -434,7 +466,8 @@ void main() {
     vec3 amb = mix(vec3(0.12, 0.11, 0.12), vec3(0.42, 0.40, 0.46), n.z * 0.5 + 0.5) * uAmb;
     float sh = (passMode == 0 && (grid || ramp) && !inGoal) ? shadowAt(p) : 0.0;
     float ao = 0.0;
-    vec3 lit = col * (amb * 1.25 + SUN_COL * ndl * 0.75 * (1.0 - sh)) * (1.0 - ao);
+    // the shadow also takes some of the sky light (sun-only shadows were too faint to read)
+    vec3 lit = col * (amb * 1.25 * (1.0 - 0.65 * sh) + SUN_COL * ndl * 0.75 * (1.0 - sh)) * (1.0 - ao);
     vec3 H = normalize(SUN_DIR + V);
     lit += SUN_COL * spec * pow(max(dot(n, H), 0.0), 30.0) * (1.0 - sh);
     lit += emis;
@@ -579,7 +612,8 @@ void main() {
     float ndl = max(dot(n, SUN_DIR), 0.0);
     vec3 amb = mix(vec3(0.12, 0.11, 0.12), vec3(0.42, 0.40, 0.46), n.z * 0.5 + 0.5) * uAmb;
     vec3 col = v_col * mix(0.62, 1.22, v_t) + vec3(0.012, 0.018, 0.0) * v_t;       // dark roots, sunlit tips
-    vec3 lit = col * (amb * 1.25 + SUN_COL * ndl * 0.75 * v_light) * (1.0 - v_ao);
+    // the shadow also takes some of the sky light (sun-only shadows were too faint to read)
+    vec3 lit = col * (amb * 1.25 * (1.0 - 0.65 * (1.0 - v_light)) + SUN_COL * ndl * 0.75 * v_light) * (1.0 - v_ao);
     // light through the blade tips when looking toward the sun
     lit += col * SUN_COL * 0.25 * v_t * v_light * pow(max(dot(-V, SUN_DIR), 0.0), 4.0);
     f_color = vec4(to_srgb(lit), 1.0);
@@ -1112,8 +1146,12 @@ void main() {
         vec2 u = q * 2.3 + v_seed;
         float n = n2(u) * 0.62 + n2(u * 2.1 + 7.0) * 0.38;
         float body = smoothstep(0.05, 0.30, (1.0 - sqrt(r2)) * 1.25 - (n - 0.5) * 1.1);
-        a = v_col.a * body * (0.55 + 0.6 * n);
-        col = mix(col * (0.75 + 0.5 * n), vec3(1.0, 0.93, 0.55), (1.0 - r2) * n * 0.6);
+        // opacity holds while the particle's alpha ramps down and only drops in its last third: puffs stay solid,
+        // saturated fire until they vanish instead of thinning into pale ghosts
+        a = min(smoothstep(0.0, 0.35, v_col.a) * body * (0.70 + 0.45 * n), 1.0);
+        // bright yellow-white core, the particle's colour (orange as it burns out) at the ragged edge
+        float core = smoothstep(0.25, 0.95, (1.0 - sqrt(r2)) + (n - 0.5) * 0.5);
+        col = mix(col * (0.80 + 0.4 * n), vec3(1.0, 0.95, 0.62), core * 0.75);
     }
     f_color = vec4(col * a, a);      // premultiplied: works for additive (ONE,ONE) and over
 }
@@ -1410,6 +1448,10 @@ void main() {
         float ndl = max(dot(n, SUN_DIR), 0.0);
         vec3 amb = mix(vec3(0.08), vec3(0.35, 0.34, 0.38), n.z * 0.5 + 0.5) * uAmb;
         c = tex * 0.7 * (amb * 1.3 + SUN_COL * ndl * 0.8);
+        // polished gun-metal: a sharp sun glint and the sky reflected at grazing angles
+        vec3 Rm = reflect(-V, n);
+        c += SUN_COL * pow(max(dot(Rm, SUN_DIR), 0.0), 60.0) * 0.9;
+        c += sky_color(Rm) * (0.10 + 0.35 * pow(1.0 - ndv, 4.0));
         if (charge >= 0.0) {
             // Empty pad (RL): the base stays black for the first half of the recharge, then turns white, the
             // white spreading from the outer edge in to the centre (soft gradient) until the orb is back.

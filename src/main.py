@@ -38,6 +38,7 @@ import audio as rl_audio
 import events as rl_events
 import fx as rl_fx
 import rl_shaders
+import padmesh
 import carrig
 import landscape
 import maps as rl_maps
@@ -694,7 +695,7 @@ class RSVRenderer:
         pp = self.prog_pad
         pp["m_vp"].write(vp_bytes)
         pp["camPos"].write(cam_bytes)
-        self.t_boostpad.use(location=0)
+        self.t_padgen.use(location=0)
         pp["Texture"].value = 0
         pp["flash"].value = 0.0
         self.render_target.use()
@@ -1005,9 +1006,13 @@ class RSVRenderer:
         # Boost pads: own program (glowing gold top, respawn ghost, respawn flash)
         self.prog_pad = self.ctx.program(vertex_shader=rl_shaders.PAD_VERT, fragment_shader=rl_shaders.PAD_FRAG)
         self.pad_vaos_rl = {}
-        for name in self._pad_vaos:
-            loader = wvf.Loader(wvf.SceneDescription(path=DATA_DIR_PATH + "/" + name))
-            self.pad_vaos_rl[name] = loader.load().root_nodes[0].mesh.vao.instance(self.prog_pad)
+        # generated smooth, high-poly pads (padmesh.py) in place of the low-poly OBJs, with their own 2-texel
+        # metal / gold texture
+        for name, data in padmesh.all_meshes().items():
+            self.pad_vaos_rl[name] = self.ctx.vertex_array(self.prog_pad, [(self.ctx.buffer(data.tobytes()), "3f 3f 2f",
+                                                                            "in_position", "in_normal", "in_texcoord_0")])
+        self.t_padgen = self.ctx.texture((2, 1), 4, padmesh.PAD_TEX.tobytes())
+        self.t_padgen.filter = (moderngl.NEAREST, moderngl.NEAREST)
         self._pad_prev = None
         self._pad_pick_t = []
         self._pad_spawn_t = []
@@ -1296,6 +1301,7 @@ class RSVRenderer:
 
     # ---- 2D HUD (screen-space overlay) ------------------------------------
 
+    SS_TRAIL_LIFE = 0.13             # supersonic trail length in seconds (~1.3 car lengths at supersonic speed)
     # Car speed (uu/s) at/above which the car is supersonic
     SUPERSONIC_SPEED = 2200.0
     BOOST_SOUND_HOLD = 0.35     # s: feathered boost presses closer than this = one boost (sound only)
@@ -2475,7 +2481,7 @@ class RSVRenderer:
             pp = self.prog_pad
             pp["m_vp"].write(vp_bytes)
             pp["camPos"].write(cam_bytes)
-            self.t_boostpad.use(location=0)
+            self.t_padgen.use(location=0)
             pp["Texture"].value = 0
             pp["ghost"].value = 0.0
             self.render_target.use()
@@ -2603,17 +2609,17 @@ class RSVRenderer:
                 right = fastvec.cross(car_forward, car_up)
                 for k, side in enumerate((-1.0, 1.0)):
                     rib = self.car_ribbons[2 * i + k]
-                    emit = car_pos - car_forward * 36.0 + right * (side * 29.0) - car_up * 13.0
-                    rib.update(supersonic, 0, emit, Vector3((0.0, 0.0, 0.0)), 0.45, delta_time)
+                    emit = car_pos - car_forward * 36.0 + right * (side * 29.0) - car_up * 11.0
+                    rib.update(supersonic, 0, emit, Vector3((0.0, 0.0, 0.0)), self.SS_TRAIL_LIFE, delta_time)
                     if car_state.phys.is_teleporting():
                         rib.points.clear()
                     if len(rib.points) > 1:
-                        # RL's supersonic trail: a thin white pinstripe off each rear wheel with white speckle along
-                        # it; the same for both teams
-                        # RL-style supersonic trail (same for both teams): a flat ribbon lying on the surface behind
-                        # each rear wheel -- soft lavender glow, bright white core -- with white speckle along it
-                        self.fx.add_trail(rib, 0.45, 9.0, (0.72, 0.62, 1.0, 0.55), up=tuple(car_up), flat=True)
-                        self.fx.add_trail(rib, 0.45, 2.6, (1.0, 1.0, 1.0, 0.95), up=tuple(car_up), flat=True)
+                        # RL's supersonic trail (the same for both teams): off each rear wheel a SHORT, thin, glowing
+                        # violet streak -- hot pink-white where it leaves the wheel, deep violet -> blue as it thins
+                        # out about a car length and a half behind -- with tiny bluish-white sparkles along it.
+                        L_ = self.SS_TRAIL_LIFE
+                        self.fx.add_tube(rib, L_, 17.0, (0.55, 0.12, 1.0, 0.40))              # outer violet glow
+                        self.fx.add_tube(rib, L_, 5.5, (0.78, 0.32, 1.0, 1.0), white_from=0.0, white_len=28.0)
                         self.fx.sparkle((i, k), tuple(emit), delta_time)
         self.ctx.enable(moderngl.CULL_FACE)
         self.audio.update_boost(boosting)
@@ -2640,7 +2646,8 @@ class RSVRenderer:
         cf3 = np.zeros((9, 3), "f4"); cu3 = np.zeros((9, 3), "f4"); cu3[:, 2] = 1.0
         cf3[:len(caster_f3)] = caster_f3; cu3[:len(caster_u3)] = caster_u3
         self.prog_rl_arena["casters"].write(cst.tobytes())
-        self.prog_rl_arena["casterFwd"].write(cfw.tobytes())
+        if "casterFwd" in self.prog_rl_arena:          # (the arena shader may not use it)
+            self.prog_rl_arena["casterFwd"].write(cfw.tobytes())
         self.prog_rl_arena["casterF3"].write(cf3.tobytes())
         self.prog_rl_arena["casterU3"].write(cu3.tobytes())
         self.prog_rl_arena["nCasters"].value = len(casters)

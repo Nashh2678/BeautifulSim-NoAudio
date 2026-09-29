@@ -102,7 +102,7 @@ run("demo", eye=(-900.0, -900.0, 350.0), target=(0.0, 0.0, 80.0), ball=(0.0, 150
     ages=[0.03, 0.12, 0.3, 0.7], spectate=0)
 # goal
 run("goal", eye=(0.0, 3500.0, 600.0), target=(0.0, 5300.0, 250.0), ball=(0.0, 5300.0, 250.0), cars=[],
-    ev={"kind": "goal", "pos": (0.0, 5300.0, 250.0), "team": 0}, ages=[0.05, 0.2, 0.45, 0.9], spectate=-1)
+    ev={"kind": "goal", "pos": (0.0, 5300.0, 250.0), "team": 0}, ages=[0.05, 0.3, 0.7, 1.3], spectate=-1)
 # a hit on the ball (sparks)
 run("hit", eye=(-300.0, -220.0, 150.0), target=(0.0, 0.0, 100.0), ball=(0.0, 0.0, 93.0), cars=[car(0, (-95.0, 0.0, 17.0), fwd=(1, 0, 0))],
     ev={"kind": "fxsparks", "pos": (-74.0, -55.0, 93.0), "normal": (-0.8, -0.6, 0.1), "strength": 900.0}, ages=[0.02, 0.05, 0.09, 0.14], spectate=-1)
@@ -191,3 +191,53 @@ def pickups_seq():
 
 if not args.only or "pickups" in args.only.split(","):
     pickups_seq()
+
+
+# floor -> wall curve close-up (smooth shading, colours)
+run("curve", eye=(2600.0, 1200.0, 300.0), target=(4096.0, 300.0, 120.0), ball=(0.0, 0.0, 93.0), cars=[],
+    ev=None, ages=[0.05], spectate=-1)
+run("curve_o", eye=(-2200.0, 3700.0, 420.0), target=(-3300.0, 5120.0, 100.0), ball=(0.0, 0.0, 93.0), cars=[],
+    ev=None, ages=[0.05], spectate=-1)
+
+# car shadows: flat, nose-up 45 deg, on its side, upside down in the air
+_s2 = 0.70710678
+run("shadow", eye=(-520.0, -460.0, 480.0), target=(0.0, 0.0, 40.0), ball=(0.0, 2500.0, 93.0),
+    cars=[car(0, (-250.0, 0.0, 17.0)), car(0, (-40.0, 0.0, 90.0), fwd=(_s2, 0, _s2), up=(-_s2, 0, _s2)),
+          car(1, (170.0, 0.0, 60.0), fwd=(0, 1, 0), up=(1, 0, 0)), car(1, (360.0, 0.0, 160.0), up=(0, 0, -1))],
+    ev=None, ages=[0.05], spectate=-1)
+
+
+def run_moving(name, speed, boosting, ages, cam_off=(-420.0, -160.0, 150.0), z=17.0, y0=-2500.0):
+    """A car driving along +y at `speed` (fed every frame like a live feed), camera following it."""
+    if args.only and name not in args.only.split(","):
+        return
+    t0 = time.time()
+    r.spectate_idx = -1
+    shots = []
+    todo = list(ages)
+    while todo:
+        tt = time.time() - t0
+        y = y0 + speed * tt
+        c = car(0, (0.0, y, z), boosting=boosting)
+        c["phys"]["vel"] = [0.0, speed, 0.0]
+        c["on_ground"] = z < 20
+        j = {"gamemode": "soccar", "ball_phys": {"pos": [2500, 0, 93], "vel": [0, 0, 0], "ang_vel": [0, 0, 0]},
+             "cars": [c], "boost_pad_states": [True] * 34}
+        with state_manager.global_state_mutex:
+            st = state_manager.global_state_manager.state
+            st.read_from_json(j); st.read_from_json(j)
+            st.recv_time = time.time(); st.recv_interval = 1 / 120
+        state_manager.pose_cam = ((cam_off[0], y + cam_off[1], z + cam_off[2]), (0.0, y - 120.0, z + 10.0))
+        im = frame()
+        if tt >= todo[0]:
+            shots.append(im); todo.pop(0)
+    sheet = Image.new("RGB", (W * 2, H * ((len(shots) + 1) // 2)))
+    for i, im in enumerate(shots):
+        sheet.paste(im, ((i % 2) * W, (i // 2) * H))
+    sheet.save(os.path.join(args.out, name + ".png"))
+    print("saved", name)
+
+
+run_moving("supersonic", 2300.0, False, [0.6, 1.0])
+run_moving("boostdrive", 1400.0, True, [0.6, 1.0], cam_off=(-380.0, -520.0, 170.0))
+run_moving("boostair", 900.0, True, [0.8, 1.2], cam_off=(-520.0, -600.0, 60.0), z=500.0)
