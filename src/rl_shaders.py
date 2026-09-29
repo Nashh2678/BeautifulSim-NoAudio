@@ -65,45 +65,38 @@ float sdRoundBox(vec2 p, vec2 b, float r) {
     vec2 q = abs(p) - b + r;
     return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
 }
+// Signed distance from world point w to caster i (car: its oriented hitbox, rounded a little; ball: its sphere).
+float casterSD(int i, vec3 w) {
+    vec3 d = w - casters[i].xyz;
+    if (dot(casterFwd[i], casterFwd[i]) > 0.0) {
+        vec3 F = casterF3[i], U = casterU3[i];
+        vec3 R = cross(U, F);
+        vec3 q = vec3(dot(d, F) - 13.88, dot(d, R), dot(d, U) - 20.75);    // Octane hitbox centre offset
+        vec3 e = abs(q) - vec3(55.0, 38.0, 14.0);                           // 118 x 84 x 36, minus the rounding
+        return length(max(e, 0.0)) + min(max(e.x, max(e.y, e.z)), 0.0) - 4.0;
+    }
+    return length(d) - 91.25;
+}
+// Shadow of the ball and the cars on surface point p: a soft shadow ray marched toward the light (mostly straight
+// up, a little toward the sun) against the casters' real shapes -- the shadow has the car's outline, follows its
+// orientation, lands on the curves too, and gets softer the higher the body is above the surface.
 float shadowAt(vec3 p) {
+    vec3 L = normalize(mix(SUN_DIR, vec3(0.0, 0.0, 1.0), 0.65));
     float sh = 0.0;
     for (int i = 0; i < nCasters; i++) {
-        vec4 c = casters[i];
-        float h = c.z - p.z;
-        if (h < -20.0) continue;
-        vec2 d = p.xy - c.xy;
-        vec2 f = casterFwd[i];
-        if (dot(f, f) > 0.0) { vec2 fr = vec2(-f.y, f.x); d = vec2(dot(d, f) / 1.55, dot(d, fr)); }
-        float soft = 1.0 + h / 900.0;
-        float r = c.w * soft;
-        float a = 1.0 - smoothstep(r * 0.45, r, length(d));
-        sh = max(sh, a * (1.0 - smoothstep(300.0, 2600.0, h)) * (0.6 / soft));
+        vec3 dc = casters[i].xyz - p;
+        float along = dot(dc, L);
+        if (along < -60.0 || along > 1800.0) continue;
+        vec3 w = p + L * along;                                          // the light ray's closest point to the caster
+        if (dot(w - casters[i].xyz, w - casters[i].xyz) > 190.0 * 190.0) continue;
+        // one shape evaluation there: the caster's cross-section seen along the light = its outline (a car's
+        // footprint follows its orientation); the edge softens the higher the body is above the surface
+        float sd = casterSD(i, w);
+        float soft = 3.0 + along * 0.08;
+        float strength = dot(casterFwd[i], casterFwd[i]) > 0.0 ? 0.62 : 0.55;
+        sh = max(sh, (1.0 - smoothstep(-soft, soft, sd)) * strength * (1.0 - smoothstep(600.0, 1800.0, along)));
     }
     return sh;
-}
-// Contact occlusion, in 3D: how close a surface point is to the car's real oriented hitbox (or to the ball's sphere), so
-// it works on the floor, the floor-wall curves and the walls, follows the car's orientation (an upside-down or tilted
-// car shades what is actually under it) and vanishes as the body lifts away. Darkens sky/ambient light only.
-float contactAO(vec3 p) {
-    float ao = 0.0;
-    for (int i = 0; i < nCasters; i++) {
-        vec3 d = p - casters[i].xyz;
-        if (dot(d, d) > 250.0 * 250.0) continue;
-        float o;
-        if (dot(casterFwd[i], casterFwd[i]) > 0.0) {            // car: Octane hitbox 118 x 84 x 36, centre (13.9, 0, 20.75) from the origin
-            vec3 F = casterF3[i], U = casterU3[i];
-            vec3 R = cross(U, F);
-            vec3 q = vec3(dot(d, F) - 13.88, dot(d, R), dot(d, U) - 20.75);
-            vec3 e = abs(q) - vec3(59.0, 42.0, 18.0);
-            float sd = length(max(e, 0.0)) + min(max(e.x, max(e.y, e.z)), 0.0);
-            o = pow(1.0 - smoothstep(2.0, 95.0, sd), 1.6) * 0.62;
-        } else {                                                // ball
-            float sd = length(d) - 92.75;
-            o = pow(1.0 - smoothstep(0.0, 70.0, sd), 2.0) * 0.55;
-        }
-        ao = max(ao, o);
-    }
-    return ao;
 }
 // Coverage of a line of half-width w (world units) at distance d, for a pixel whose footprint ACROSS the line is
 // g world units. Energy-preserving: once the line is thinner than a pixel it keeps a one-pixel width and fades by
@@ -439,8 +432,8 @@ void main() {
     // ---- lighting ----
     float ndl = max(dot(n, SUN_DIR), 0.0);
     vec3 amb = mix(vec3(0.12, 0.11, 0.12), vec3(0.42, 0.40, 0.46), n.z * 0.5 + 0.5) * uAmb;
-    float sh = grid ? shadowAt(p) : 0.0;
-    float ao = (passMode == 0 && (grid || ramp)) ? contactAO(p) : 0.0;
+    float sh = (passMode == 0 && (grid || ramp) && !inGoal) ? shadowAt(p) : 0.0;
+    float ao = 0.0;
     vec3 lit = col * (amb * 1.25 + SUN_COL * ndl * 0.75 * (1.0 - sh)) * (1.0 - ao);
     vec3 H = normalize(SUN_DIR + V);
     lit += SUN_COL * spec * pow(max(dot(n, H), 0.0), 30.0) * (1.0 - sh);
@@ -450,6 +443,11 @@ void main() {
     f_color = vec4(to_srgb(lit) * (passMode == 1 ? alpha : 1.0), alpha);   // premultiplied in pass 1
 }
 '''
+
+# The arena pass variants, compiled separately: with passMode a constant the compiler drops the other pass's code (the
+# glass shader carries no turf / markings / shadow code and vice versa) -- fewer registers, better GPU occupancy.
+ARENA_FRAG_OPAQUE = ARENA_FRAG.replace("uniform int passMode;", "const int passMode = 0;")
+ARENA_FRAG_GLASS = ARENA_FRAG.replace("uniform int passMode;", "const int passMode = 1;")
 
 # --------------------------------------------------------------------------------------------- #
 # 3D grass: real blades (one tapered, bent triangle each) on the field near the camera. Fully generated on the GPU:
@@ -494,6 +492,14 @@ void main() {
     int k = gl_VertexID - blade * 3;
     vec2 seed = vec2(hash1(i_tile * 0.0131 + 0.7), hash1(i_tile * 0.0173 + 5.3));
     vec2 f = fract(seed + vec2(0.7548776662, 0.5698402910) * float(blade + 1));
+    // whole tile outside the view (bounding sphere vs the clip volume, with a generous margin): skip it
+    vec4 tc = m_vp * vec4(i_tile + 0.5 * tileSize, 0.0, 1.0);
+    float tr = 0.75 * tileSize + 20.0;
+    if (tc.w < -tr || abs(tc.x) > tc.w + 3.0 * tr || abs(tc.y) > tc.w + 3.0 * tr) {
+        v_col = vec3(0.0); v_nrm = vec3(0.0, 0.0, 1.0); v_pos = vec3(0.0); v_t = 0.0; v_light = 1.0; v_ao = 0.0;
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        return;
+    }
     vec2 root = i_tile + f * tileSize;
     float d = length(camPos - vec3(root, 0.0));
     float want = density0 * min(1.0, nearD * nearD / max(d * d, 1.0));
@@ -502,15 +508,24 @@ void main() {
     // only on the turf the floor shader keeps (its cut where the ramps start), a little inside it
     float inner = max(max(abs(root.x) - 3760.0, abs(root.y) - 4880.0), (abs(root.x) + abs(root.y) - 8064.0) * 0.7071 + 330.0);
     keep *= 1.0 - smoothstep(-40.0, -10.0, inner);
-    keep *= smoothstep(0.25, 0.75, textureLod(padMask, root / vec2(8400.0, 10400.0) + 0.5, 0.0).r);
+    if (keep > 0.0)                             // (texture fetch only for blades that survived the thinning)
+        keep *= smoothstep(0.25, 0.75, textureLod(padMask, root / vec2(8400.0, 10400.0) + 0.5, 0.0).r);
+    if (keep <= 0.0) {                          // thinned-out blade: nothing else to compute
+        v_col = vec3(0.0); v_nrm = vec3(0.0, 0.0, 1.0); v_pos = vec3(0.0); v_t = 0.0; v_light = 1.0; v_ao = 0.0;
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        return;
+    }
 
     float r1 = hash1(root * 1.37 + 0.1), r2 = hash1(root * 2.11 + 7.0), r3 = hash1(root * 0.73 + 3.0);
     float h = bladeH * (0.55 + 0.9 * r1 * r1) * keep;
     // pressed flat under the cars' wheels / body and under a ball sitting on the turf
     float ao = 0.0, lit = 1.0;
+    bool nearCaster = false;
     for (int i = 0; i < nCasters; i++) {
         vec4 c = casters[i];
         vec2 dd = root - c.xy;
+        if (dot(dd, dd) > 170.0 * 170.0 || c.z > 130.0) continue;           // nothing to flatten here
+        nearCaster = true;
         vec2 fw = casterFwd[i];
         if (dot(fw, fw) > 0.0) {
             vec2 q = vec2(dot(dd, fw), dot(dd, vec2(-fw.y, fw.x)));
@@ -522,7 +537,7 @@ void main() {
     }
     vec3 rp = vec3(root, 0.0);
     lit = 1.0 - shadowAt(rp);
-    ao = contactAO(rp);
+    ao = 0.0;
 
     float yaw = r2 * 6.2831853;
     vec2 side = vec2(cos(yaw), sin(yaw));
@@ -536,7 +551,7 @@ void main() {
     v_t = k == 2 ? 1.0 : 0.0;
     v_nrm = normalize(cross(tip - rp, vec3(side, 0.0)));
     vec3 alb = textureLod(albedoTex, root / vec2(8400.0, 10400.0) + 0.5, 0.0).rgb;
-    v_col = mix(alb * (0.85 + 0.3 * r1), vec3(0.85), markRoot(root) * 0.85);
+    v_col = alb * (0.85 + 0.3 * r1);
     v_light = lit;
     v_ao = ao;
     gl_Position = m_vp * vec4(P, 1.0);
@@ -1066,24 +1081,41 @@ in vec3 in_pos;
 in vec4 in_col;
 in float in_size;
 out vec4 v_col;
+out float v_seed;           // >= 0: flame puff (noisy, ragged edge) with this seed; < 0: plain soft dot
 void main() {
     vec4 cp = m_vp * vec4(in_pos, 1.0);
     gl_Position = cp;
-    gl_PointSize = clamp(in_size * pxScale / max(cp.w, 1.0), 1.0, 512.0);
+    gl_PointSize = clamp(abs(in_size) * pxScale / max(cp.w, 1.0), 1.0, 512.0);
     v_col = in_col;
+    v_seed = in_size < 0.0 ? fract(sin(dot(in_pos.xy, vec2(12.9898, 78.233)) + in_pos.z) * 43758.5453) * 97.0 : -1.0;
 }
 '''
 
 PARTICLE_FRAG = '''
 #version 330
 in vec4 v_col;
+in float v_seed;
 out vec4 f_color;
+float h2(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float n2(vec2 p) {
+    vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(h2(i), h2(i + vec2(1, 0)), f.x), mix(h2(i + vec2(0, 1)), h2(i + vec2(1, 1)), f.x), f.y);
+}
 void main() {
     vec2 q = gl_PointCoord * 2.0 - 1.0;
     float r2 = dot(q, q);
     if (r2 > 1.0) discard;
     float a = v_col.a * (1.0 - r2) * (1.0 - r2);
-    f_color = vec4(v_col.rgb * a, a);      // premultiplied: works for additive (ONE,ONE) and over
+    vec3 col = v_col.rgb;
+    if (v_seed >= 0.0) {
+        // flame puff: ragged, lumpy edge and a brighter, yellower core
+        vec2 u = q * 2.3 + v_seed;
+        float n = n2(u) * 0.62 + n2(u * 2.1 + 7.0) * 0.38;
+        float body = smoothstep(0.05, 0.30, (1.0 - sqrt(r2)) * 1.25 - (n - 0.5) * 1.1);
+        a = v_col.a * body * (0.55 + 0.6 * n);
+        col = mix(col * (0.75 + 0.5 * n), vec3(1.0, 0.93, 0.55), (1.0 - r2) * n * 0.6);
+    }
+    f_color = vec4(col * a, a);      // premultiplied: works for additive (ONE,ONE) and over
 }
 '''
 
@@ -1357,12 +1389,10 @@ void main() {
         if (!glowPart || v_oz < orbZ) discard;
         // the orb mesh is low-poly: take the SPHERE's normal (from the orb centre) so the soft rim is smooth
         if (orbCz > -100.0) ndv = abs(dot(normalize(vec3(v_oxy, v_oz - orbCz)), V));
-        float sharp = ghost * ghost * (3.0 - 2.0 * ghost);             // eased 0..1
-        float band = mix(1.0, 0.16, sharp);                            // width of the soft rim (1 = all soft)
-        float body = smoothstep(0.0, band, ndv);
-        vec3 c = mix(vec3(0.84, 0.88, 0.97), vec3(1.0, 0.64, 0.18), smoothstep(0.45, 1.0, sharp));
-        c *= 0.95 + 0.35 * pow(1.0 - ndv, 2.0) * sharp;                // a rim only once it is in focus
-        float a = mix(0.30, 0.90, sharp) * body * smoothstep(0.0, 0.2, ghost);
+        // blurry and white-grey the whole time: fully soft silhouette, only its opacity fades in at the start
+        float body = smoothstep(0.0, 0.95, ndv);
+        vec3 c = vec3(0.80, 0.82, 0.86) * (0.9 + 0.2 * ndv);
+        float a = 0.62 * body * smoothstep(0.0, 0.25, ghost);
         f_color = vec4(to_srgb(c), a);
         return;
     }

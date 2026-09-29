@@ -171,3 +171,23 @@ def pads_seq():
 
 if not args.only or "pads" in args.only.split(","):
     pads_seq()
+
+# pad pickups close up: small pad (left) and big pad (right) picked up at t=0
+def pickups_seq():
+    state_manager.pose_cam = ((-2400.0, -3500.0, 260.0), (-2900.0, -3700.0, 40.0))
+    r.spectate_idx = -1
+    for _ in range(5): frame()
+    t0 = time.time(); shots = []
+    r.fx.pad_pickup((-3072.0, -4096.0, 0.0), True)
+    r.fx.pad_pickup((-2700.0, -3400.0, 0.0), False)
+    for a in [0.02, 0.06, 0.15, 0.3]:
+        while time.time() - t0 < a: frame()
+        shots.append(frame())
+    sheet = Image.new("RGB", (W * 2, H * 2))
+    for i, im in enumerate(shots):
+        sheet.paste(im, ((i % 2) * W, (i // 2) * H))
+    sheet.save(os.path.join(args.out, "pickups.png")); print("saved pickups")
+
+
+if not args.only or "pickups" in args.only.split(","):
+    pickups_seq()
