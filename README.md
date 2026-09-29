@@ -11,14 +11,15 @@ This version ships **without any sound files or Rocket League game files**: ever
 from RocketSimVis or is generated procedurally. The sound system is all there, though: drop your own sound
 files into `data/sounds/` and they play (see [Sound](#sound)).
 
-<p align="center"><img src="docs/boost.jpg" alt="Boosting towards the ball in Parc de Paris" width="100%"></p>
+<p align="center"><img src="docs/paris.jpg" alt="Parc de Paris: a shot on goal, the opponent boosting in" width="100%"></p>
 <p align="center">
-  <img src="docs/flipreset.jpg" alt="Flip reset indicator in Evening Valley" width="49%">
-  <img src="docs/demo.jpg" alt="Demolition in Forbidden Temple" width="49%">
-  <img src="docs/goal.jpg" alt="Goal explosion in Parc de Paris" width="49%">
-  <img src="docs/overview.jpg" alt="Forbidden Temple arena with a ball trail" width="49%">
+  <img src="docs/valley.jpg" alt="Evening Valley: a dribble" width="49%">
+  <img src="docs/temple.jpg" alt="Forbidden Temple: an aerial touch" width="49%">
+  <img src="docs/orbit.jpg" alt="Orbit: an aerial touch under the ringed planet" width="49%">
+  <img src="docs/goal.jpg" alt="Parc de Paris: goal explosion" width="49%">
 </p>
-<p align="center"><sub>All screenshots: High preset, 1920x1080, rendered by <code>tools/readme_shots.py</code>.</sub></p>
+<p align="center"><sub>A real bot game (1v1), one map per shot: Parc de Paris, Evening Valley, Forbidden Temple and
+Orbit. High preset, 1920x1080, rendered with <code>tools/readme_shots.py</code>.</sub></p>
 
 ## Installation (Windows)
 
@@ -156,7 +157,9 @@ All in `tools/`, all headless (no window):
 
 - `fx_gallery.py --out <dir> [--only goal,boostdrive] [--map paris]`: close-up contact sheets of every effect.
 - `headless_test.py --out <dir>`: a scripted 2v2 scene with screenshots, per-frame timing and the event log.
-- `readme_shots.py`: re-renders the README screenshots in `docs/`.
+- `readme_shots.py <recording> --map paris --every 0.5` (or `--at 3.0,27.0`): stills of a recorded game at the High
+  preset, like the screenshots above. Recordings come from the clip recorder: start the vis with
+  `RSV_CLIP_KEEP_REPLAY=1` and press C; the replay is kept in `clips/` next to the mp4.
 - `gpu_contention_bench.py`: how much the vis slows down a CUDA training workload (needs PyTorch).
 
 ## Credits

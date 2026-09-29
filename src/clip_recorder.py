@@ -294,11 +294,12 @@ class ClipRecorder:
             script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "offline_render.py")
             self.active = {"out": out, "t0": time.time(), "state": "rendering", "frac": 0.0, "t_end": None,
                            "base": self._done_mtime()}
-            subprocess.Popen([sys.executable, script, "--replay", replay, "--out", out, "--done", self._done_path],
+            keep = ["--keep-replay"] if os.environ.get("RSV_CLIP_KEEP_REPLAY") == "1" else []   # e.g. for tools/readme_shots.py
+            subprocess.Popen([sys.executable, script, "--replay", replay, "--out", out, "--done", self._done_path, *keep],
                              stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT,
                              # no window; NORMAL priority (the vis itself runs above normal, children would inherit it)
                              creationflags=(0x08000000 | 0x20) if os.name == "nt" else 0)
-            print("[clip] rendering {:.1f}s ({} packets) on the dGPU -> {}".format(
+            print("[clip] rendering {:.1f}s ({} packets) offscreen -> {}".format(
                 now - max(t_start, packets[0][0]), len(packets), out))
         except Exception as e:
             print("[clip] ERROR starting the offline render: {!r}".format(e))
