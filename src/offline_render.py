@@ -3,9 +3,9 @@ real time.
 
 Instead of screen-recording the live window, this replays a recorded packet stream through the exact
 same renderer (RSVRenderer) and event/sound logic on a VIRTUAL clock, in a standalone OpenGL context
-(which lands on the RTX on this laptop, unlike the vis window). Frames are converted to yuv420p on the
-GPU (shader pass), read back asynchronously (double-buffered PBO) and piped into ffmpeg's NVENC
-encoder, so the CPU only runs the renderer's own Python. The sound is mixed offline from the very same
+(on a laptop with an NVIDIA GPU it lands on that GPU, unlike the vis window). Frames are converted to yuv420p on
+the GPU (shader pass), read back asynchronously (double-buffered PBO) and piped into ffmpeg's hardware
+encoder (NVENC / AMF, else x264), so the CPU only runs the renderer's own Python. The sound is mixed offline from the very same
 play()/boost/engine calls the live vis makes (same gains, panning, per-category sliders), then muxed
 in as AAC.
 

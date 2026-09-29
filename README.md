@@ -63,9 +63,13 @@ Run several instances side by side with `RSV_PORT=<port>`.
 | H | show/hide the top-left panel (Edit Settings: camera, audio, graphics) |
 | ← ↑ → ↓ | map: ← Forbidden Temple, ↑ Evening Valley, → Parc de Paris, ↓ Orbit (remembered for the next start) |
 
-**Graphics** (H → Edit Settings → Graphics, applied live): anti-aliasing (MSAA off/2x/4x/8x), resolution
-(Balanced caps the 3D scene at 2.1 MP and upscales it: pick Native on a 1440p/4K screen if it looks soft, or
-Supersampled for extra smoothness), distant detail, VSync, frame-rate cap. Camera settings mirror Rocket League's.
+**Graphics** (H → Edit Settings → Graphics, applied live and remembered):
+- **Quality preset**: Low / Medium / High set everything below at once (Low is made for integrated GPUs, High maxes
+  everything); changing any single setting afterwards shows "Custom".
+- **Visual quality** sliders: shadow quality, crowd size, map detail, grass, particles and render resolution (70 / 85 / 100%).
+- Toggles for shadows, the ball trail and the ball circles; anti-aliasing (MSAA off/2x/4x/8x); resolution (Balanced
+  caps the 3D scene at 2.1 MP and upscales it: pick Native on a 1440p/4K screen if it looks soft, or Supersampled
+  for extra smoothness); distant detail; VSync; frame-rate cap.
 
 The 1/2/3 and S/D keys are requests sent to whatever is streaming the game (a small UDP side channel, see
 [networking-format.md](networking-format.md)). A sender that doesn't handle them keeps working; the visualizer
@@ -99,9 +103,9 @@ there are git-ignored, so they never get committed by accident.
   that stay black, then whiten from the edge in as they recharge, with the orb coming back as a blurry ghost that
   sharpens into gold just before it respawns, and Rocket League's white ball marker on the ground under the ball
   (an outer ring the size of the ball and an inner ring of 4 arcs that shrinks to 4 dots as the ball rises).
-- **Ball trail**: like Rocket League, a round tube in the colour of the last team to touch the ball, shown above
+- **Ball trail**: like Rocket League, a real 3D tube in the colour of the last team to touch the ball, shown above
   82 kph, white right behind the ball, soft at the edges and fading out over 1 s.
-- **Effects**: boost flames, supersonic trails, jump and flip flashes, sparks where a car's body (not its wheels)
+- **Effects**: an Alpha Boost-style boost (two streams of flame puffs), supersonic trails, jump and flip flashes, sparks where a car's body (not its wheels)
   hits the ball, the arena or another car, faint streaks from the car's corners while it flips, demolition
   explosions, goal bursts, boost pad
   pickups, a boost gauge, a Rocket League-style flip-reset indicator (a white disc under the car's wheels,

@@ -12,7 +12,6 @@ Effects (what RL shows):
   goal         big team-colored burst + ring at the ball
 """
 import math
-import time
 
 import numpy as np
 import moderngl
@@ -127,7 +126,7 @@ void main() {
     float xn = clamp(t, 0.0, 0.5) * 20.0; int in_ = min(int(xn), 9);
     v_noise = mix(NO[in_], NO[in_ + 1], xn - float(in_));
     v_alpha = c21(AL, t);
-    v_bright = c21(BR, t);
+    v_bright = max(c21(BR, t), 0.6);                 // young puffs stay bright yellow (not olive over grass)
     v_dist = c21(DI, t);
     v_t = t;
     v_seed = in_seed;
@@ -168,7 +167,7 @@ void main() {
     float inner = smoothstep(0.1, 0.9, body);
     vec3 hdr = vec3(2.5, 1.0, 0.125) * v_bright * (0.25 + 1.8 * inner) * (0.8 + 0.4 * nf);
     vec3 col = 1.0 - exp(-hdr * 1.05);
-    f_color = vec4(col * a, a * 0.93);                 // premultiplied "over", a touch additive (glow)
+    f_color = vec4(col * a, a * 0.8);                  // premultiplied "over", partly additive (glow)
 }
 """
 
@@ -274,73 +273,6 @@ def _half_sphere(nlon=48, nlat=12):
             q = (P(a0, b0), P(a0, b1), P(a1, b1), P(a1, b0))
             tris += [q[0], q[1], q[2], q[0], q[2], q[3]]
     return np.asarray(tris, "f4")
-
-
-FLAME_VERT = """
-#version 330
-uniform mat4 m_vp;
-uniform mat4 m_model;
-uniform float L;          // flame length (uu)
-uniform float R0;         // radius at the nozzle
-uniform vec3 nozzle;      // car-space nozzle position
-uniform float time;
-in vec2 in_sa;            // s = 0..1 along the flame, a = angle around it
-out float v_s;
-out vec3 v_n;
-out vec3 v_p;
-out float v_a;
-void main() {
-    float s = in_sa.x, a = in_sa.y;
-    float wob = 1.0 + 0.04 * sin(time * 47.0 + a * 2.0) * s;
-    float r = R0 * pow(1.0 - s, 0.55) * (0.75 + 0.5 * smoothstep(0.0, 0.18, s)) * wob;
-    vec3 radial = vec3(0.0, cos(a), sin(a));
-    vec3 lp = nozzle + vec3(-s * L, 0.0, 0.0) + radial * r;
-    vec4 wp = m_model * vec4(lp, 1.0);
-    v_p = wp.xyz;
-    v_n = mat3(m_model) * radial;
-    v_s = s; v_a = a;
-    gl_Position = m_vp * wp;
-}
-"""
-FLAME_FRAG = """
-#version 330
-uniform vec3 camPos;
-uniform vec3 hotCol;
-uniform vec3 flameCol;
-uniform float time;
-uniform float gain;
-in float v_s;
-in vec3 v_n;
-in vec3 v_p;
-in float v_a;
-out vec4 f_color;
-float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-float noise(vec2 p) {
-    vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
-    return mix(mix(hash(i), hash(i + vec2(1, 0)), f.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), f.x), f.y);
-}
-void main() {
-    vec3 V = normalize(camPos - v_p);
-    float edge = pow(abs(dot(normalize(v_n), V)), 0.9);           // soft silhouette
-    float n = noise(vec2(v_s * 7.0 - time * 26.0, v_a * 1.3)) * 0.6 + noise(vec2(v_s * 17.0 - time * 41.0, v_a * 3.1)) * 0.4;
-    float body = pow(1.0 - v_s, 1.4) * (0.55 + 0.75 * n);
-    vec3 c = mix(vec3(1.0), hotCol, smoothstep(0.02, 0.22, v_s));
-    c = mix(c, flameCol, smoothstep(0.25, 0.75, v_s));
-    float a = clamp(body * edge * gain, 0.0, 1.0);
-    f_color = vec4(c * a, a);
-}
-"""
-
-
-def _flame_mesh(ns=14, na=18):
-    """Triangle list over (s, angle) for the flame cone."""
-    verts = []
-    for i in range(ns):
-        s0, s1 = i / ns, (i + 1) / ns
-        for j in range(na):
-            a0, a1 = 2 * math.pi * j / na, 2 * math.pi * (j + 1) / na
-            verts += [(s0, a0), (s1, a0), (s1, a1), (s0, a0), (s1, a1), (s0, a1)]
-    return np.asarray(verts, "f4")
 
 
 TEAM_BOOST = [
@@ -474,7 +406,6 @@ class FX:
         self._boost_accum = {}
         self._boost_last_base = {}
         self.flares = []                           # hit flashes: [pos, age, life, size, alpha]
-        self.nozzle_flares = []
         self.domes = []                            # pad pickup glow domes: [pos, age, life, r0, r1, alpha]
         self.shells = []                           # goal shock spheres: [pos, age, life, r0, r1, col, alpha]
         self._rng = np.random.default_rng()
@@ -497,11 +428,6 @@ class FX:
         self.TUBE3D_MAX = 32768
         self.tube3d_vbo = ctx.buffer(reserve=self.TUBE3D_MAX * 10 * 4, dynamic=True)
         self.tube3d_vao = ctx.vertex_array(self.tube3d_prog, [(self.tube3d_vbo, "3f 3f 4f", "in_pos", "in_nrm", "in_col")])
-        self.flame_prog = ctx.program(vertex_shader=FLAME_VERT, fragment_shader=FLAME_FRAG)
-        fm = _flame_mesh()
-        self.flame_vao = ctx.vertex_array(self.flame_prog, [(ctx.buffer(fm.tobytes()), "2f", "in_sa")])
-        self.flame_n = len(fm)
-        self._flames = []
         self.cam_right = np.array([1.0, 0.0, 0.0], "f4")
         self.cam_up = np.array([0.0, 0.0, 1.0], "f4")
         self.puff_prog = ctx.program(vertex_shader=PUFF_VERT, fragment_shader=PUFF_FRAG)
@@ -763,8 +689,6 @@ class FX:
         return d / np.linalg.norm(d, axis=1, keepdims=True)
 
     NOZZLE = (-57.0, 0.0, 10.0)     # Octane exhaust, car space
-    ALPHA_HOT = (1.0, 0.90, 0.55)    # Alpha Boost: golden-yellow streams, white-hot orange glow at the nozzle. One look for
-    ALPHA_FLAME = (1.0, 0.62, 0.08)  # both teams.
     STREAM_OFFSET = 24.0             # the two streams leave the exhaust this far to each side
     PUFF_SPACING = 32.0              # the game's SpawnPerUnit: one puff per 32 uu the exhaust travels
 
@@ -796,18 +720,16 @@ class FX:
         self.puff_size[n:n + k] = self._rng.uniform(35.0, 50.0, k) * 0.95
         self.puff_n = n + k
 
-    def boost(self, key, pos, fwd, up, car_vel, team, dt, model_bytes=None):
-        """Boosting car this frame -- Alpha Boost as the game defines it (see PUFF_VERT): a flame puff left in the
-        world every 32 uu the exhaust travels (two exhausts), which then hangs there on its own 1 s life cycle; at the
-        nozzle a small hot glow blown back out of the exhaust (the game's Drive_PS emitter: 10 sprites/s, 0.5 s, growing
-        4x, colour scale 2 -> 0) and the lens-flare streak. Same for both teams."""
+    def boost(self, key, pos, fwd, up, car_vel, team, dt):
+        """Boosting car this frame -- Alpha Boost as the game defines it (see PUFF_VERT): two streams of flame puffs,
+        one puff left in the world every 32 uu the exhaust travels, each hanging there on its own 1 s life cycle (small
+        and faint at first, so the streams show up a little behind the car and grow), plus tiny sparkles. No glow at the
+        exhaust itself. Same for both teams."""
         fwd = np.asarray(fwd, "f4"); up = np.asarray(up, "f4")
         pos = np.asarray(pos, "f4")
         base = pos + fwd * self.NOZZLE[0] + up * self.NOZZLE[2]
         cv = np.asarray(car_vel, "f4")
         rng = self._rng
-        fl = float(rng.uniform(0.9, 1.1))
-        # (no glow sprite / lens flare / flame cones at the exhaust: the Alpha Boost is just its smoke + sparkles)
         right = np.array([fwd[1] * up[2] - fwd[2] * up[1], fwd[2] * up[0] - fwd[0] * up[2],
                           fwd[0] * up[1] - fwd[1] * up[0]], "f4")
         # SpawnPerUnit (UnitScalar 32 uu) x the boost actor's SpawnRate, a random 0..4 drawn per 32 uu step: on average
@@ -873,13 +795,6 @@ class FX:
         self.ctx.blend_func = moderngl.ONE, moderngl.ONE_MINUS_SRC_ALPHA
         self.puff_vao.render(moderngl.POINTS, vertices=n)
 
-    def _nozzle_flare_beams(self):
-        for p, fl in self.nozzle_flares:
-            r = self.cam_right.astype("f4") * 95.0 * fl
-            self._beams.append((np.asarray([p - r, p, p + r], "f4"), np.array([0.8, 2.2, 0.8], "f4"),
-                                np.array([[1.0, 0.55, 0.15, 0.0], [1.0, 0.80, 0.45, 0.8], [1.0, 0.55, 0.15, 0.0]], "f4")))
-        self.nozzle_flares = []
-
     def sparkle(self, key, pos, dt):
         """Supersonic trail speckle: a few tiny bluish-white sparkles left along the short violet streak."""
         rng = self._rng
@@ -893,30 +808,6 @@ class FX:
         self.add.spawn(np.asarray(pos, "f4")[None, :] + j * 3.0, j * 30.0, rng.uniform(0.10, 0.22, k),
                        rng.uniform(2.0, 3.4, k), 1.0, np.array([0.90, 0.88, 1.0, 0.9], "f4"),
                        np.array([0.55, 0.55, 1.0, 0.0], "f4"), drag=1.0)
-
-    def _render_flames(self, m_vp_bytes, cam_pos):
-        if not self._flames:
-            return
-        fp = self.flame_prog
-        fp["m_vp"].write(m_vp_bytes)
-        fp["camPos"].value = tuple(float(c) for c in cam_pos)
-        t = time.time() % 1000.0
-        fp["time"].value = t
-        fp["nozzle"].value = self.NOZZLE
-        self.ctx.blend_func = moderngl.ONE, moderngl.ONE
-        self.ctx.disable(moderngl.CULL_FACE)
-        for model_bytes, hot, flame in self._flames:
-            fp["m_model"].write(model_bytes)
-            fl = 0.92 + 0.16 * math.sin(t * 53.0) * math.sin(t * 31.0)
-            for L, R0, gain, h, f in ((95.0 * fl, 12.0, 0.85, hot, flame), (48.0 * fl, 6.0, 1.3, (1.0, 1.0, 1.0), hot)):
-                fp["L"].value = L
-                fp["R0"].value = R0
-                fp["gain"].value = gain
-                fp["hotCol"].value = tuple(h)
-                fp["flameCol"].value = tuple(f)
-                self.flame_vao.render(moderngl.TRIANGLES, vertices=self.flame_n)
-        self.ctx.enable(moderngl.CULL_FACE)
-        self._flames = []
 
     def ring(self, center, normal, r0, r1, life, width, color, core=(1, 1, 1), arc_dir=None, arcw=-1.0, delay=0.0,
              billboard=False, fill=0.0, sparkle=0.0, ontop=False, mode=0):
@@ -1320,11 +1211,9 @@ class FX:
         ctx.enable(moderngl.BLEND)
         ctx.fbo.depth_mask = False                     # particles test depth but never write it
         self._flare_beams()
-        self._nozzle_flare_beams()
         self._render_trails(m_vp_bytes, cam_pos)
         self._render_tubes(m_vp_bytes, cam_pos)
         self._render_tubes3d(m_vp_bytes, cam_pos)
-        self._render_flames(m_vp_bytes, cam_pos)
         self._render_domes(m_vp_bytes, cam_pos)
         self._render_shells(m_vp_bytes, cam_pos)
         if self.alpha.n or self.add.n or self._pad_glow is not None or self.puff_n:

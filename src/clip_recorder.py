@@ -30,7 +30,7 @@ import numpy as np
 
 CLIP_SECONDS = float(os.environ.get("RSV_CLIP_SECONDS", "12"))   # how much gameplay the clip keeps
 # "replay" (default): dump the last CLIP_SECONDS of received packets + camera choices and re-render
-# them with offline_render.py -- headless on the RTX, 1080p60, with sound, NVENC -- instead of
+# them with offline_render.py -- headless (discrete GPU when there is one), 1080p60, with sound -- instead of
 # screen-grabbing this window. "frames": the old JPEG frame ring (no sound, 20 fps, window-res).
 CLIP_MODE = os.environ.get("RSV_CLIP_MODE", "replay").lower()
 CAPTURE_FPS = 20.0      # frames/sec pulled into the ring buffer (plenty for a clip)

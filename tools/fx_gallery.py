@@ -19,6 +19,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--out", required=True)
 ap.add_argument("--size", default="1280x720")
 ap.add_argument("--only", default="", help="comma list of scenes")
+ap.add_argument("--map", default="", help="map to render on (default: the saved one)")
 args = ap.parse_args()
 os.makedirs(args.out, exist_ok=True)
 
@@ -38,6 +39,8 @@ for kv in filter(None, os.environ.get("RSV_CFG", "").split(",")):     # config o
     setattr(r.config, k_, v_)
 r.audio.wait_loaded()
 r.init_gl(ctx)
+if args.map:
+    r.set_map(args.map, save=False)
 screen = ctx.framebuffer(color_attachments=[ctx.texture((W, H), 4)], depth_attachment=ctx.depth_renderbuffer((W, H)))
 
 

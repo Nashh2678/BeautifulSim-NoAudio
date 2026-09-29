@@ -15,10 +15,7 @@ OpenGL.ERROR_CHECKING = False
 import math
 import random
 import threading
-import sys 
-import argparse
 import copy
-import struct
 import time
 
 import fastvec  # fast pyrr Vector3 operators -- must come before any vector math
@@ -32,8 +29,8 @@ from ribbon import *
 # outline_renderer (OutlineRenderer) is disabled -- not imported (it cost ~1 s at startup)
 from clip_recorder import ClipRecorder
 import ui
-from ui import get_ui, QUIBarWidget, QRSVWindow
-from config import Config, ConfigVal
+from ui import get_ui, QRSVWindow
+from config import Config
 import audio as rl_audio
 import events as rl_events
 import fx as rl_fx
@@ -50,14 +47,14 @@ from moderngl_window import resources
 from moderngl_window.meta import TextureDescription
 
 from PyQt5 import QtOpenGL, QtWidgets
-from PyQt5.QtCore import QSize, Qt
-from PyQt5.QtGui import QScreen, QColor
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QScreen
 
 # (PyOpenGL's GL/GLU star imports cost ~0.6 s at startup and were only used for GL_LINES)
 
 import numpy as np
 
-from pyrr import Quaternion, Matrix33, Matrix44, Vector3, Vector4
+from pyrr import Matrix44, Vector3, Vector4
 
 import pywavefront
 
@@ -70,8 +67,8 @@ def safe_normalize(vec: pyrr.Vector3):
     return vec / length
 
 # Scene render budget. The 3D scene is drawn into its own MSAA framebuffer at the window size, scaled
-# down only if that exceeds RSV_MAX_RENDER_MP megapixels (default 2.1 ~= the old 1080p cap), then upscaled to
-# the window (2.1 MP ~= the old 1080p cap: the vis usually runs on the 780M iGPU); HUD/overlays are drawn afterwards at full native resolution so they stay crisp.
+# down only if that exceeds RSV_MAX_RENDER_MP megapixels (default 2.1 ~= 1080p, cheap enough for integrated GPUs),
+# then upscaled to the window; HUD/overlays are drawn afterwards at full native resolution so they stay crisp.
 RENDER_SCALE = float(os.environ.get("RSV_RENDER_SCALE", "1.0"))
 MAX_RENDER_MP = float(os.environ.get("RSV_MAX_RENDER_MP", "2.1"))
 MSAA = int(os.environ.get("RSV_MSAA", "4"))
@@ -1527,51 +1524,6 @@ class RSVRenderer:
         self.render_target.use()
         self.hud_c_vao.render(moderngl.TRIANGLE_STRIP, vertices=len(inter))
 
-    def _hud_batch_draw_unused(self, items):
-        # ONE-DRAW path: every item is a TRIANGLE_STRIP and we know the ortho matrix -> concatenate
-        # them into a single strip joined by DEGENERATE (zero-area) triangles, carrying colour per
-        # vertex. Zero-area triangles emit no fragments, and strip order is preserved, so the blended
-        # result is identical to drawing each band separately. Cull/depth are already disabled by the
-        # 2D caller, so the winding flips degenerate stitching causes are harmless.
-        if self._hud_ortho is not None and all(m == moderngl.TRIANGLE_STRIP for _v, _c, m in items)                 and off + 2 * len(blocks) <= self.hud_c_max_verts:
-            pos_parts, col_parts = [], []
-            for i, (arr, (verts, color, _m)) in enumerate(zip(blocks, items)):
-                col = np.empty((len(arr), 4), dtype='f4')
-                col[:] = np.asarray(color, dtype='f4')
-                if i > 0:
-                    pos_parts.append(pos_parts[-1][-1:])        # repeat previous last vertex
-                    col_parts.append(col_parts[-1][-1:])
-                    pos_parts.append(arr[:1])                   # and the new first vertex
-                    col_parts.append(col[:1])
-                pos_parts.append(arr)
-                col_parts.append(col)
-            pos = np.concatenate(pos_parts, axis=0)
-            col = np.concatenate(col_parts, axis=0)
-            inter = np.empty((len(pos), 7), dtype='f4')
-            inter[:, 0:3] = pos
-            inter[:, 3:7] = col
-            self.hud_c_vbo.write(inter.tobytes(), 0)
-            self._hud_c_prog['m_vp'].write(self._hud_ortho.astype('f4'))
-            self.render_target.use()
-            self.hud_c_vao.render(moderngl.TRIANGLE_STRIP, vertices=len(inter))
-            return
-
-        self.hud_vbo.write(np.concatenate(blocks, axis=0).tobytes(), 0)
-
-        # LEAN per-band draw. Going through render_model cost ~7 ms for 120 bands because every call
-        # rebuilt Matrix44.identity().astype('f4'), wrote BOTH model-matrix uniforms, and rebound the
-        # texture + framebuffer -- all identical for every band in the batch. Hoist that setup out and
-        # per band only the colour uniform changes. Same state, same draws, same result.
-        ident = Matrix44.identity().astype('f4')
-        self.pr_m_model.write(ident)
-        self.pra_m_model.write(ident)
-        self.t_none.use()
-        self.render_target.use()
-        vao = self.vaos["hud"]
-        for (verts, color, mode), (start, count) in zip(items, offsets):
-            self.pr_global_color.write(Vector4(color).astype('f4'))
-            vao.render(mode, vertices=count, first=start)
-
     _IDENT_F4 = np.eye(4, dtype="f4").tobytes()
 
     def _hud_draw(self, verts, color, mode):
@@ -2080,7 +2032,7 @@ class RSVRenderer:
         self.ctx.disable(moderngl.DEPTH_TEST)
         self.ctx.disable(moderngl.CULL_FACE)
 
-        # 30% smaller than before (was height*0.05, clamp [30,130]) per user; still the biggest HUD text.
+        # the biggest HUD text
         ch_h = float(np.clip(height * 0.035, 21.0, 91.0))
         ch_w = ch_h * 0.62
         gap = ch_w * 0.32
@@ -2215,9 +2167,8 @@ class RSVRenderer:
                 # frame, so there is zero translational lag regardless of how fast the car moves. Reset
                 # (snap, no lag) whenever we start/re-start spectating a car so it doesn't drift in from
                 # a stale previous car's state.
-                # XY (horizontal) smoothing unchanged; Z (vertical) gets EXTRA smoothing (TAU doubled)
-                # per user -- "smooth it even more, only on the z axis" -- so horizontal tracking stays
-                # just as responsive while vertical bob/height changes ease in more gently.
+                # Z (vertical) gets extra smoothing (TAU doubled) so horizontal tracking stays just as
+                # responsive while vertical bob/height changes ease in more gently.
                 TAU_XY = 0.24
                 TAU_Z = 0.48
                 lerp_xy = 1.0 - math.exp(-delta_time / TAU_XY)
@@ -2288,7 +2239,7 @@ class RSVRenderer:
                 self.car_cam_time = min(target, self.car_cam_time + step)
             else:
                 self.car_cam_time = max(target, self.car_cam_time - step)
-            # Slightly smoothed transition (S-curve / smoothstep, per user's sketch): self.car_cam_time
+            # Slightly smoothed transition (S-curve / smoothstep): self.car_cam_time
             # is still the RAW linear 0..1 progress (so the switch still takes exactly TRANSITION_SEC
             # total), but the actual blend weight eases in/out -- slow-start, faster through the middle,
             # slow-finish -- instead of a constant-speed linear blend.
@@ -2820,8 +2771,7 @@ class RSVRenderer:
                 caster_u3.append((float(car_up[0]), float(car_up[1]), float(car_up[2])))
 
             if car_state.is_boosting:
-                self.fx.boost(i, tuple(car_pos), tuple(car_forward), tuple(car_up), tuple(car_vel), team, delta_time,
-                              car_model)
+                self.fx.boost(i, tuple(car_pos), tuple(car_forward), tuple(car_up), tuple(car_vel), team, delta_time)
                 self._boost_last[i] = cur_time
             else:
                 self.fx.boost_end(i)
@@ -3504,13 +3454,12 @@ class _ProgPair:
 class FramePacer:
     """VSync at the monitor's refresh when the machine keeps up, otherwise EVERY OTHER refresh (swap interval 2).
 
-    On the 165 Hz panel a frame has 6.1 ms; the vis needs ~5-7 ms (more on the heavier maps, or while training takes
-    the CPU), so frames straddled the budget and the display alternated between 165 and 82 fps at random -- the
-    "random frame drops" (worst on Parc de Paris, the heaviest map). A steady half rate looks smooth; the jitter did
-    not. Every PROBE_S seconds at half rate it tries full rate again for a moment and keeps it if frames fit."""
+    Opt-in (RSV_PACER=1). On a 165 Hz screen a frame has 6.1 ms; when frames straddle that budget the display
+    alternates between full and half rate. This locks to a steady half rate instead, and every PROBE_S seconds tries
+    full rate again for a moment and keeps it if frames fit."""
     WINDOW = 90                  # frames per decision
     MISS = 0.08                  # > 8% of frames late = can't hold this rate
-    PROBE_S = 6.0                # (was 20 s: one slow patch locked the half rate for 20-60 s)
+    PROBE_S = 20.0
 
     def __init__(self, refresh_hz):
         self.period = 1.0 / max(30.0, float(refresh_hz))
@@ -3544,7 +3493,7 @@ class FramePacer:
             miss = self.late / float(self.n)
             if self.interval == 1 and miss > self.MISS:
                 self.interval = 2
-                self.probe_at = now + (self.PROBE_S * 2 if self.probing else self.PROBE_S)
+                self.probe_at = now + (self.PROBE_S * 3 if self.probing else self.PROBE_S)
                 print("[pacing] {:.0f}% late at {:.0f} fps -> {:.0f} fps".format(
                     100 * miss, 1 / self.period, 0.5 / self.period), flush=True)
             elif self.interval == 1 and self.probing:
@@ -3714,11 +3663,10 @@ def main():
     render_timer = QTimer()
     render_timer.setTimerType(Qt.PreciseTimer)
     render_timer.timeout.connect(_drive_render)
-    # Frame pacing: 60 fps by default -- the vis shares the GPU with training, and 60 keeps the SPS cost
-    # small (see tools/gpu_contention_bench.py). RSV_FPS raises/lowers it (capped at the monitor's
-    # refresh rate); RSV_FRAME_MS still overrides the interval directly.
+    # Frame pacing: the monitor's refresh rate by default (vsync paces the rest). RSV_FPS=<n> caps it lower (e.g. to
+    # leave more GPU to a training run, see tools/gpu_contention_bench.py); RSV_FRAME_MS overrides the interval.
     try:
-        # fastest attached screen (the primary may be a 60 Hz external while the vis sits on the 165 Hz panel)
+        # fastest attached screen (the primary may be a 60 Hz external while the vis sits on a faster panel)
         refresh = max(float(sc.refreshRate()) for sc in app.screens()) or 60.0
     except Exception:
         refresh = 60.0

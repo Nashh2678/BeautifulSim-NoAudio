@@ -71,7 +71,7 @@ class Config:
         "q_particles": ("Particles", ["Low", "Medium", "High"], 2),
         "q_res": ("Render resolution", ["70%", "85%", "100%"], 2),
     }
-    # Low = 165 fps on the laptop's integrated GPU (Radeon 780M), High = everything maxed
+    # Low = high frame rates on integrated GPUs, High = everything maxed
     PRESETS = {
         "low": {"gfx_aa": 2, "q_shadow": 0, "q_crowd": 0, "q_map": 0, "gfx_grass": 0, "q_particles": 0, "q_res": 0},
         "medium": {"gfx_aa": 4, "q_shadow": 1, "q_crowd": 1, "q_map": 1, "gfx_grass": 1, "q_particles": 1, "q_res": 1},
