@@ -207,12 +207,12 @@ run("shadow", eye=(-520.0, -460.0, 480.0), target=(0.0, 0.0, 40.0), ball=(0.0, 2
     ev=None, ages=[0.05], spectate=-1)
 
 
-def run_moving(name, speed, boosting, ages, cam_off=(-420.0, -160.0, 150.0), z=17.0, y0=-2500.0):
+def run_moving(name, speed, boosting, ages, cam_off=(-420.0, -160.0, 150.0), z=17.0, y0=-2500.0, pov=False):
     """A car driving along +y at `speed` (fed every frame like a live feed), camera following it."""
     if args.only and name not in args.only.split(","):
         return
     t0 = time.time()
-    r.spectate_idx = -1
+    r.spectate_idx = 0 if pov else -1
     shots = []
     todo = list(ages)
     while todo:
@@ -221,13 +221,14 @@ def run_moving(name, speed, boosting, ages, cam_off=(-420.0, -160.0, 150.0), z=1
         c = car(0, (0.0, y, z), boosting=boosting)
         c["phys"]["vel"] = [0.0, speed, 0.0]
         c["on_ground"] = z < 20
-        j = {"gamemode": "soccar", "ball_phys": {"pos": [2500, 0, 93], "vel": [0, 0, 0], "ang_vel": [0, 0, 0]},
+        bp = [0.0, y + 2600.0, 93.0] if pov else [2500, 0, 93]
+        j = {"gamemode": "soccar", "ball_phys": {"pos": bp, "vel": [0, 0, 0], "ang_vel": [0, 0, 0]},
              "cars": [c], "boost_pad_states": [True] * 34}
         with state_manager.global_state_mutex:
             st = state_manager.global_state_manager.state
             st.read_from_json(j); st.read_from_json(j)
             st.recv_time = time.time(); st.recv_interval = 1 / 120
-        state_manager.pose_cam = ((cam_off[0], y + cam_off[1], z + cam_off[2]), (0.0, y - 120.0, z + 10.0))
+        state_manager.pose_cam = None if pov else ((cam_off[0], y + cam_off[1], z + cam_off[2]), (0.0, y - 120.0, z + 10.0))
         im = frame()
         if tt >= todo[0]:
             shots.append(im); todo.pop(0)
@@ -254,3 +255,10 @@ if not args.only or "temple_goal" in args.only.split(","):
     run("temple_goal", eye=(0.0, 2600.0, 900.0), target=(0.0, 4600.0, 0.0), ball=(0.0, 0.0, 93.0), cars=[],
         ev=None, ages=[0.05], spectate=-1)
     r.set_map(_prev_map, save=False)
+
+run_moving("boostpov", 1300.0, True, [0.5, 0.9], pov=True)
+run_moving("boostpov_slow", 500.0, True, [0.5, 0.9], pov=True)
+
+# grass close-up (compare grass modes)
+run("grass", eye=(-600.0, -900.0, 160.0), target=(-200.0, -300.0, 0.0), ball=(0.0, 2500.0, 93.0),
+    cars=[car(0, (-150.0, -250.0, 17.0))], ev=None, ages=[0.05], spectate=-1)

@@ -69,16 +69,21 @@ float sdRoundBox(vec2 p, vec2 b, float r) {
 // sun's direction, blurred wider the farther the caster is above the surface (soft penumbra), and only where the caster
 // is actually between the point and the sun.
 uniform sampler2D shadowAtlas;
+uniform int shadowsOn;         // settings: shadows on / off
+uniform int shTaps;            // settings: shadow quality -> soft-edge taps (0, 4, 8)
 uniform vec3 shL;              // toward the light (the sun direction, elevation clamped)
 uniform vec3 shU;              // tile axes, perpendicular to shL
 uniform vec3 shV;
 const float SH_H = 100.0;      // tile half extent (uu) around the caster
 #ifndef SH_NTAPS
-#define SH_NTAPS 4             // soft-edge taps around the centre one (the grass uses 0: its bilinear tap is soft enough)
+#define SH_NTAPS 8             // max soft-edge taps around the centre one (the grass uses 0: its bilinear tap is enough)
 #endif
-const vec2 SH_TAPS[4] = vec2[4](vec2(-0.7, -0.35), vec2(0.35, -0.7), vec2(0.7, 0.35), vec2(-0.35, 0.7));
+const vec2 SH_TAPS[8] = vec2[8](vec2(-0.7, -0.35), vec2(0.35, -0.7), vec2(0.7, 0.35), vec2(-0.35, 0.7),
+                                vec2(-0.9, 0.35), vec2(0.0, -0.95), vec2(0.9, -0.2), vec2(0.1, 0.95));
 float shadowAt(vec3 p) {
+    if (shadowsOn == 0) return 0.0;
     float sh = 0.0;
+    int nt = min(shTaps, SH_NTAPS);
     for (int i = 0; i < nCasters; i++) {
         vec3 d = p - casters[i].xyz;
         if (dot(d.xy, d.xy) > 1800.0 * 1800.0) continue;   // cheap reject first
@@ -95,10 +100,11 @@ float shadowAt(vec3 p) {
         vec2 s = textureLod(shadowAtlas, uv, 0.0).rg;
         float occ = s.r * step(ld + 3.0, s.g);
         for (int k = 0; k < SH_NTAPS; k++) {
+            if (k >= nt) break;
             s = textureLod(shadowAtlas, clamp(uv + SH_TAPS[k] * rad, lo, hi), 0.0).rg;
             occ += s.r * step(ld + 3.0, s.g);
         }
-        occ /= float(SH_NTAPS + 1);
+        occ /= float(nt + 1);
         float strength = casters[i].w < 80.0 ? 0.78 : 0.68;
         sh = max(sh, occ * strength * (1.0 - smoothstep(500.0, 1800.0, h)));
     }
@@ -1394,20 +1400,36 @@ PAD_VERT = """
 #version 330
 uniform mat4 m_vp;
 uniform mat4 m_model;
+uniform int instanced;     // 1: all pads of one mesh in one draw, per-pad data in i_a / i_b (model = x, y, scale 2.5)
+uniform float flash;       // (non-instanced draws: the returning-orb ghost pass)
+uniform float pulse;
+uniform float charge;
+uniform float padR;
 in vec3 in_position;
 in vec3 in_normal;
 in vec2 in_texcoord_0;
+in vec4 i_a;               // x, y, flash, pulse
+in vec2 i_b;               // charge, padR
 out vec3 v_pos;
 out vec3 v_nrm;
 out vec2 v_uv;
 out float v_oz;
 out vec2 v_oxy;
+out vec4 v_pp;             // flash, pulse, charge, padR
 void main() {
-    vec4 wp = m_model * vec4(in_position, 1.0);
+    vec4 wp;
+    if (instanced == 1) {
+        wp = vec4(in_position * 2.5 + vec3(i_a.xy, 0.0), 1.0);
+        v_nrm = in_normal;
+        v_pp = vec4(i_a.zw, i_b);
+    } else {
+        wp = m_model * vec4(in_position, 1.0);
+        v_nrm = normalize(mat3(m_model) * in_normal);
+        v_pp = vec4(flash, pulse, charge, padR);
+    }
     v_pos = wp.xyz;
     v_oz = in_position.z;
     v_oxy = in_position.xy;
-    v_nrm = normalize(mat3(m_model) * in_normal);
     v_uv = in_texcoord_0;
     gl_Position = m_vp * wp;
 }
@@ -1421,17 +1443,15 @@ uniform vec3 camPos;
 uniform float ghost;       // >0: returning-orb pass (alpha blended), value = its fade-in 0..1
 uniform float orbZ;        // object-space z where the big pad's orb starts (the gold cone below is skipped)
 uniform float orbCz;       // ghost pass: object-space z of the big orb's centre (smooth sphere normals); < -100 = none
-uniform float flash;       // 0..1 just-respawned flash
-uniform float pulse;
-uniform float charge;      // empty pad: recharge progress 0..1 (-1 = not an empty-pad draw)
-uniform float padR;        // pad radius in object space (the base's outer edge)
 in vec3 v_pos;
 in vec3 v_nrm;
 in vec2 v_uv;
 in float v_oz;
 in vec2 v_oxy;
+in vec4 v_pp;              // flash (0..1 just respawned), pulse, charge (empty pad: recharge 0..1, -1 = n/a), padR
 out vec4 f_color;
 void main() {
+    float flash = v_pp.x, pulse = v_pp.y, charge = v_pp.z, padR = v_pp.w;
     vec3 tex = texture(Texture, v_uv).rgb;
     float sat = max(tex.r, max(tex.g, tex.b)) - min(tex.r, min(tex.g, tex.b));
     bool glowPart = sat > 0.25;
@@ -1614,6 +1634,11 @@ void main() {
     vec3 V = normalize(camPos - v_pos);
     if (dot(n, V) < 0.0) n = -n;
     float kind = floor(v_ek.y + 0.5);
+#ifdef LOWQ
+    // Map detail = Low: no per-pixel patterns (plain albedo); water, lamps, screens and the Eiffel lattice stay
+    if (kind == 3.0 || kind == 8.0 || kind == 10.0 || kind == 11.0 || kind == 12.0 || kind == 13.0 || kind == 15.0)
+        kind = kind == 8.0 ? 0.0 : 0.0;
+#endif
     float em = v_ek.x;
     vec3 alb = v_col;
     vec3 emis = vec3(0.0);
@@ -1941,3 +1966,6 @@ void main() {
     f_color = vec4(clamp(0.5 + g * 0.25, 0.0, 1.0), 0.0, 0.0, 1.0);
 }
 '''
+
+# Map detail = Low: the scenery shader without its per-pixel patterns
+SCENE_FRAG_LOW = SCENE_FRAG.replace("#version 330\n", "#version 330\n#define LOWQ\n", 1)

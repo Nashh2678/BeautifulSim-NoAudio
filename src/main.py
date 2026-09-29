@@ -417,7 +417,7 @@ class RSVRenderer:
 
     def _theme_programs(self):
         return (self.prog_rl_arena, self.prog_car, self.prog_ball, self.prog_sky, self.prog_stadium, self.prog_pad,
-                self.prog_scene, self.prog_crowd, self.prog_grass)
+                self.prog_scene, self.prog_scene_low, self.prog_crowd, self.prog_grass)
 
     # ---- 3D grass (GRASS_VERT) ---------------------------------------------------------------------------------- #
     GRASS_TILE = 128.0
@@ -567,6 +567,8 @@ class RSVRenderer:
         self.prog_rl_arena["grassCol"].value = tuple(th["grass"])
         self.prog_rl_arena["glassK"].value = float(th.get("glass", 1.0))
         self.prog_scene["uNight"].value = float(th.get("night", 1.0))
+        if "uNight" in self.prog_scene_low:
+            self.prog_scene_low["uNight"].value = float(th.get("night", 1.0))
         self.prog_sky["mapId"].value = mid
         self.prog_sky["cloudA"].value = tuple(th["cloudA"])
         self.prog_sky["cloudB"].value = tuple(th["cloudB"])
@@ -576,14 +578,14 @@ class RSVRenderer:
             self._bake_space_sky()
         if name in rl_maps.BUILDERS and name not in self._scenes:
             mesh, crowd = rl_maps.load_or_build(name, DATA_DIR_PATH)
-            vao = self.ctx.vertex_array(self.prog_scene, [(self.ctx.buffer(mesh.tobytes()), "3f 3f 2f",
-                                                           "in_position", "in_col", "in_ek")])
+            # shuffled once: the crowd quality setting draws a prefix = an evenly thinned crowd
+            crowd = crowd[np.random.default_rng(5).permutation(len(crowd))] if len(crowd) else crowd
             cvao = None
             if len(crowd):
                 cvao = self.ctx.vertex_array(self.prog_crowd, [
                     (self.egg_vbo, "2f", "in_corner"),
                     (self.ctx.buffer(crowd.tobytes()), "3f 3f 2f/i", "i_pos", "i_col", "i_ps")])
-            self._scenes[name] = (vao, len(mesh), cvao, len(crowd))
+            self._scenes[name] = {"mesh": mesh, "cvao": cvao, "n_eggs": len(crowd), "lod": {}}
         if save:
             _write_settings({"map": name})
         print("[map] {}".format(rl_maps.TITLE[name]), flush=True)
@@ -593,22 +595,52 @@ class RSVRenderer:
         now = time.time()
         return (min(now - self._cheer_t[0], 1e4), min(now - self._cheer_t[1], 1e4))
 
+    MAP_DETAIL_MIN_AREA = (10000.0, 2000.0, 0.0)     # Map detail Low / Medium / High: drop triangles smaller than this
+    CROWD_FRAC = (0.3, 0.65, 1.0)                    # Crowd Low / Medium / High
+
+    @staticmethod
+    def _decimate(mesh, stride_pos=3, min_area=0.0):
+        """Drop the scenery's tiniest triangles (small details: < ~1% of its area) -> fewer polygons."""
+        if min_area <= 0.0:
+            return mesh
+        P = mesh[:, :stride_pos].reshape(-1, 3, 3)
+        A = 0.5 * np.linalg.norm(np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0]), axis=1)
+        keep = np.repeat(A >= min_area, 3)
+        return np.ascontiguousarray(mesh[keep])
+
     def _render_scenery(self, vp_bytes, cam_bytes, tnow):
+        q = max(0, min(2, int(getattr(self.config, "q_map", 2))))
         if self.map_name == "valley":                      # landscape.py's valley + the extras (maps.build_valley)
+            lods = self.__dict__.setdefault("_stadium_lods", {})
+            if q not in lods:
+                if q == 2:
+                    lods[q] = (self.stadium_vao, self.stadium_n)
+                else:
+                    m = self._decimate(self._stadium_mesh, 3, self.MAP_DETAIL_MIN_AREA[q])
+                    lods[q] = (self.ctx.vertex_array(self.prog_stadium, [(self.ctx.buffer(m.tobytes()), "3f 2f",
+                                                                          "in_position", "in_uv")]), len(m))
+            svao, sn = lods[q]
             self.prog_stadium["m_vp"].write(vp_bytes)
             self.prog_stadium["camPos"].write(cam_bytes)
             if "stadium" not in _SKIP:
-                self.stadium_vao.render(moderngl.TRIANGLES, vertices=self.stadium_n)
+                svao.render(moderngl.TRIANGLES, vertices=sn)
         if self.map_name not in self._scenes:
             return
-        vao, n, cvao, n_eggs = self._scenes[self.map_name]
-        ps = self.prog_scene
+        sc = self._scenes[self.map_name]
+        ps = self.prog_scene_low if q == 0 else self.prog_scene
+        if q not in sc["lod"]:
+            m = self._decimate(sc["mesh"], 3, self.MAP_DETAIL_MIN_AREA[q])
+            sc["lod"][q] = (self.ctx.vertex_array(ps, [(self.ctx.buffer(m.tobytes()), "3f 3f 2f",
+                                                       "in_position", "in_col", "in_ek")]), len(m))
+        vao, n = sc["lod"][q]
+        cvao = sc["cvao"]
+        n_eggs = int(sc["n_eggs"] * self.CROWD_FRAC[max(0, min(2, int(getattr(self.config, "q_crowd", 2))))])
         ps["m_vp"].write(vp_bytes)
         ps["camPos"].write(cam_bytes)
         ps["time"].value = tnow
         if "stadium" not in _SKIP:
             vao.render(moderngl.TRIANGLES, vertices=n)
-        if cvao is not None and "crowd" not in _SKIP:
+        if cvao is not None and n_eggs > 0 and "crowd" not in _SKIP:
             pc = self.prog_crowd
             pc["m_vp"].write(vp_bytes)
             pc["camPos"].write(cam_bytes)
@@ -714,25 +746,31 @@ class RSVRenderer:
     def _ball_spin_blur(self, f, u, teleported):
         """(object-space axis, angle) the ball turned since the previous frame, x shutter, for the spin motion blur
         in BALL_FRAG. The object frame is the model matrix's columns (forward, left, up)."""
-        f = np.asarray(tuple(f), "f8"); u = np.asarray(tuple(u), "f8")
-        M = np.stack([f, np.cross(u, f), u], 1)
+        # plain floats: numpy's per-call overhead on 3x3 matrices cost ~0.15 ms a frame
+        f = (float(f[0]), float(f[1]), float(f[2])); u = (float(u[0]), float(u[1]), float(u[2]))
+        l_ = (u[1] * f[2] - u[2] * f[1], u[2] * f[0] - u[0] * f[2], u[0] * f[1] - u[1] * f[0])
+        M = (f, l_, u)                                   # columns
         prev, self._ball_prev_rot = getattr(self, "_ball_prev_rot", None), M
-        if prev is None or teleported:
+        if prev is None or teleported or not isinstance(prev, tuple):
             return (0.0, 0.0, 1.0, 0.0)
-        R = M @ prev.T
-        ang = math.acos(max(-1.0, min(1.0, (R[0, 0] + R[1, 1] + R[2, 2] - 1.0) * 0.5)))
+        # R = M @ prev^T = sum_k col_k(M) col_k(prev)^T
+        def Rij(i, j):
+            return M[0][i] * prev[0][j] + M[1][i] * prev[1][j] + M[2][i] * prev[2][j]
+        tr = Rij(0, 0) + Rij(1, 1) + Rij(2, 2)
+        ang = math.acos(max(-1.0, min(1.0, (tr - 1.0) * 0.5)))
         if ang < 1e-4 or ang > 1.2:                  # still, or a jump (reset) rather than a spin
             return (0.0, 0.0, 1.0, 0.0)
-        ax = np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]])
-        ax /= max(np.linalg.norm(ax), 1e-9)
-        ao = M.T @ ax
-        return (float(ao[0]), float(ao[1]), float(ao[2]), float(ang * self.BALL_SPIN_SHUTTER))
+        ax = (Rij(2, 1) - Rij(1, 2), Rij(0, 2) - Rij(2, 0), Rij(1, 0) - Rij(0, 1))
+        n_ = max(math.sqrt(ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2]), 1e-9)
+        ax = (ax[0] / n_, ax[1] / n_, ax[2] / n_)
+        ao = [M[c][0] * ax[0] + M[c][1] * ax[1] + M[c][2] * ax[2] for c in range(3)]   # M^T @ ax
+        return (ao[0], ao[1], ao[2], ang * self.BALL_SPIN_SHUTTER)
 
     BALL_MARK_TOP = 1000.0           # ball height (above the surface under it) where the inner marker ring is 4 dots
 
     def _ball_mark(self, state, ball_pos):
         """ballMark uniform for the arena shader: (x, y, z, height factor), or w < 0 while the ball is hidden."""
-        if getattr(state, "ball_hidden", False):
+        if getattr(state, "ball_hidden", False) or not int(getattr(self.config, "gfx_ball_marker", 1)):
             return (0.0, 0.0, 0.0, -1.0)
         x, y, z = float(ball_pos[0]), float(ball_pos[1]), float(ball_pos[2])
         # the arena surface straight below the ball (the floor, or the floor-wall curve near a wall): bisect the
@@ -965,6 +1003,7 @@ class RSVRenderer:
         self.stadium_vao = self.ctx.vertex_array(
             self.prog_stadium, [(self.ctx.buffer(st_mesh.tobytes()), "3f 2f", "in_position", "in_uv")])
         self.stadium_n = len(st_mesh)
+        self._stadium_mesh = st_mesh
         self.load_vao("ArenaMeshCustom.obj", self._prog_arena_opq)
         self._split_arena()
         for prog in (self.prog_rl_arena,):
@@ -1025,6 +1064,13 @@ class RSVRenderer:
         for name, data in padmesh.all_meshes().items():
             self.pad_vaos_rl[name] = self.ctx.vertex_array(self.prog_pad, [(self.ctx.buffer(data.tobytes()), "3f 3f 2f",
                                                                             "in_position", "in_normal", "in_texcoord_0")])
+        self._pad_inst_buf, self._pad_inst_vao = {}, {}
+        for name, data in padmesh.all_meshes().items():
+            buf = self.ctx.buffer(reserve=64 * 6 * 4, dynamic=True)
+            self._pad_inst_buf[name] = buf
+            self._pad_inst_vao[name] = self.ctx.vertex_array(self.prog_pad, [
+                (self.ctx.buffer(data.tobytes()), "3f 3f 2f", "in_position", "in_normal", "in_texcoord_0"),
+                (buf, "4f 2f/i", "i_a", "i_b")])
         self.t_padgen = self.ctx.texture((2, 1), 4, padmesh.PAD_TEX.tobytes())
         self.t_padgen.filter = (moderngl.NEAREST, moderngl.NEAREST)
         self._pad_prev = None
@@ -1033,6 +1079,7 @@ class RSVRenderer:
 
         # Maps (maps.py): scenery + crowd per map, switched live with the arrow keys; the last one is remembered
         self.prog_scene = self.ctx.program(vertex_shader=rl_shaders.SCENE_VERT, fragment_shader=rl_shaders.SCENE_FRAG)
+        self.prog_scene_low = self.ctx.program(vertex_shader=rl_shaders.SCENE_VERT, fragment_shader=rl_shaders.SCENE_FRAG_LOW)
         self.prog_crowd = self.ctx.program(vertex_shader=rl_shaders.CROWD_VERT, fragment_shader=rl_shaders.CROWD_FRAG)
         self.egg_vbo = self.ctx.buffer(np.array([(-1, 0), (1, 0), (1, 1), (-1, 0), (1, 1), (-1, 1)], "f4").tobytes())
         self._scenes = {}
@@ -1267,8 +1314,8 @@ class RSVRenderer:
             return
 
         first_point = ribbon.points[0]
-        cam_to_ribbon_dir = safe_normalize(-(first_point.pos - camera_pos))
-        ribbon_away_dir = safe_normalize(first_point.vel)
+        cam_to_ribbon_dir = safe_normalize(-(Vector3(first_point.pos) - camera_pos))
+        ribbon_away_dir = safe_normalize(Vector3(first_point.vel if first_point.vel is not None else (1.0, 0.0, 0.0)))
         ribbon_sideways_dir = ribbon_away_dir.cross(cam_to_ribbon_dir)
 
         # VECTORISED build (identical geometry). The old version ran a Python loop doing pyrr Vector3
@@ -1278,8 +1325,8 @@ class RSVRenderer:
         pts = [pt for pt in ribbon.points if pt.connected]
         if not pts:
             return
-        pos = np.asarray([tuple(pt.pos) for pt in pts], dtype='f4')          # (P,3)
-        ta = np.asarray([pt.time_active for pt in pts], dtype='f4')          # (P,)
+        pos = np.array([pt.pos for pt in pts], dtype='f4')                   # (P,3)
+        ta = np.array([ribbon.clock - pt.t0 for pt in pts], dtype='f4')      # (P,)
         with np.errstate(divide='ignore', invalid='ignore'):
             ws = np.where(ta < start_taper_time,
                           ta / max(start_taper_time, 1e-9),
@@ -1825,17 +1872,22 @@ class RSVRenderer:
             p[2] = max(p[2], random.uniform(8.0, 60.0))                      # never under the floor
             lines.append((p, vd.copy(), random.uniform(260.0, 620.0), alpha * random.uniform(0.7, 1.0),
                           random.uniform(1.4, 2.4)))
-        keep = []
-        for ln in lines:
-            p, d, L, a0, w = ln
-            # gone once the car (and the camera) has passed it
-            if float(np.dot(p - pos, vd)) < -900.0 or (cam is not None and float(np.dot(p - np.asarray(tuple(cam)), vd)) < -L):
-                continue
-            keep.append(ln)
-            mid = p - d * (L * 0.5)
-            self.fx._beams.append((np.asarray([p, mid, p - d * L], "f4"), np.array([w * 0.3, w, w * 0.3], "f4"),
-                                   np.array([[1, 1, 1, 0.0], [1, 1, 1, a0], [1, 1, 1, 0.0]], "f4")))
-        self._speed_lines = keep[-80:]
+        if not lines:
+            self._speed_lines = []
+            return
+        P = np.array([ln[0] for ln in lines]); D = np.array([ln[1] for ln in lines])
+        Ls = np.array([ln[2] for ln in lines]); A0 = np.array([ln[3] for ln in lines]); Wd = np.array([ln[4] for ln in lines])
+        # gone once the car (and the camera) has passed it
+        ok = (P - pos) @ vd >= -900.0
+        if cam is not None:
+            ok &= (P - np.array((float(cam[0]), float(cam[1]), float(cam[2])))) @ vd >= -Ls
+        idx = np.nonzero(ok)[0][-80:]
+        pts = np.stack([P[idx], P[idx] - D[idx] * (Ls[idx] * 0.5)[:, None], P[idx] - D[idx] * Ls[idx][:, None]], 1).astype("f4")
+        wid = (Wd[idx][:, None] * np.array([0.3, 1.0, 0.3])).astype("f4")
+        col = np.zeros((len(idx), 3, 4), "f4"); col[:, :, :3] = 1.0; col[:, 1, 3] = A0[idx]
+        if len(idx):
+            self.fx._beam_blocks.append((pts, wid, col))
+        self._speed_lines = [lines[i] for i in idx]
 
     def _heading_point(self, vel, width, height):
         """Screen point the car is heading to (its velocity's vanishing point), or None (no speed / behind)."""
@@ -2382,7 +2434,11 @@ class RSVRenderer:
     def _shadow_basis(self):
         """Light direction for the shadows: the sun's, with its elevation clamped (a low evening sun would otherwise
         stretch a car's shadow across half the field) + two axes perpendicular to it."""
-        sd = np.asarray(rl_maps.THEMES[getattr(self, "map_name", "valley")]["sun_dir"], "f8")
+        key = getattr(self, "map_name", "valley")
+        hit = getattr(self, "_sh_basis_cache", None)
+        if hit is not None and hit[0] == key:
+            return hit[1]
+        sd = np.asarray(rl_maps.THEMES[key]["sun_dir"], "f8")
         h = float(np.hypot(sd[0], sd[1]))
         if h < 1e-6:
             L = np.array([0.0, 0.0, 1.0])
@@ -2392,18 +2448,45 @@ class RSVRenderer:
         U = np.cross(L, [0.0, 0.0, 1.0]) if abs(L[2]) < 0.999 else np.array([1.0, 0.0, 0.0])
         U /= np.linalg.norm(U)
         V = np.cross(L, U)
-        return tuple(float(x) for x in L), tuple(float(x) for x in U), tuple(float(x) for x in V)
+        out = tuple(float(x) for x in L), tuple(float(x) for x in U), tuple(float(x) for x in V)
+        self._sh_basis_cache = (key, out)
+        return out
 
     def _render_shadow_atlas(self, casters, jobs):
         """casters: [(x, y, z, r)] (ball first when present), jobs: per caster [(vao, model_bytes)] -> atlas tiles."""
+        q = max(0, min(2, int(getattr(self.config, "q_shadow", 2))))
+        on = int(bool(getattr(self.config, "gfx_shadows", 1)))
+        taps = (0, 2, 4)[q]
+        if getattr(self, "_sh_state", None) != (on, taps):
+            self._sh_state = (on, taps)
+            for prog in (self.prog_rl_arena, self.prog_grass):
+                if "shadowsOn" in prog:
+                    prog["shadowsOn"].value = on
+                if "shTaps" in prog:
+                    prog["shTaps"].value = taps
+        if not on:
+            return
+        tile = (96, 128, 192)[q]
+        if tile != self.SH_TILE:
+            self.SH_TILE = tile
+            self._sh_tex.release()
+            self._sh_tex = self.ctx.texture((3 * tile, 3 * tile), 2, dtype="f2")
+            self._sh_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+            self._sh_tex.repeat_x = False
+            self._sh_tex.repeat_y = False
+            self._sh_fbo.release()
+            self._sh_fbo = self.ctx.framebuffer(color_attachments=[self._sh_tex],
+                                                depth_attachment=self.ctx.depth_renderbuffer((3 * tile, 3 * tile)))
         L, U, V = self._shadow_basis()
-        for prog in (self.prog_shadow, self.prog_rl_arena, self.prog_grass):
-            for k, v in (("shL", L), ("shU", U), ("shV", V)):
-                if k in prog:
-                    prog[k].value = v
-        for prog in (self.prog_rl_arena, self.prog_grass):
-            if "shadowAtlas" in prog:
-                prog["shadowAtlas"].value = 11
+        if getattr(self, "_sh_uniforms_for", None) != (L, U, V):
+            self._sh_uniforms_for = (L, U, V)
+            for prog in (self.prog_shadow, self.prog_rl_arena, self.prog_grass):
+                for k, v in (("shL", L), ("shU", U), ("shV", V)):
+                    if k in prog:
+                        prog[k].value = v
+            for prog in (self.prog_rl_arena, self.prog_grass):
+                if "shadowAtlas" in prog:
+                    prog["shadowAtlas"].value = 11
         fbo = self._sh_fbo
         fbo.use()
         fbo.clear(0.0, 1.0e4, 0.0, 0.0, depth=1.0)
@@ -2493,6 +2576,8 @@ class RSVRenderer:
         vp = (proj * lookat).astype('f4')
         vp_bytes = vp.tobytes()
         self._frame_vp, self._frame_cam = vp, camera_pos
+        self.fx.cam_pos = (float(camera_pos[0]), float(camera_pos[1]), float(camera_pos[2]))
+        self.fx.set_quality(getattr(self.config, "q_particles", 2))
         cam_bytes = Vector3(camera_pos).astype('f4').tobytes()
 
         self.pr_camera_pos.write(cam_bytes)
@@ -2549,25 +2634,21 @@ class RSVRenderer:
             # (PAD_FRAG `charge`), and in the last ~1 s the orb fades back in as a whitish glass sphere before it
             # pops back gold.
             ghosts, charge, glows, recharging = [], [], [], []
+            pp["instanced"].value = 1
+            inst = ([], [], [], [])                      # per mesh (2 * is_big + active): x, y, flash, pulse, charge, padR
             for i in range(n_p):
                 is_big, mat = cache[i]
-                pp["m_model"].write(mat)
                 x_, y_ = float(locs[i][0]), float(locs[i][1])
                 if states[i]:
                     st_ = self._pad_spawn_t[i]
-                    pp["flash"].value = max(0.0, 1.0 - (now_p - st_) / 0.15) if st_ is not None else 0.0
-                    pp["pulse"].value = math.sin(now_p * 3.0 + i * 1.7)
-                    pp["charge"].value = -1.0
-                    self.pad_vaos_rl[self._pad_vaos[2 * is_big + 1]].render(moderngl.TRIANGLES)
+                    fl_ = max(0.0, 1.0 - (now_p - st_) / 0.15) if st_ is not None else 0.0
+                    inst[2 * is_big + 1].append((x_, y_, fl_, math.sin(now_p * 3.0 + i * 1.7), -1.0, 0.0))
                     glows.append((x_, y_, is_big, True, 1.0, 0.0))
                 else:
-                    pp["flash"].value = 0.0
                     pt = self._pad_pick_t[i]
                     dur = self.PAD_RESPAWN_BIG if is_big else self.PAD_RESPAWN_SMALL
                     prog = 0.0 if pt is None else min(1.0, (now_p - pt) / dur)     # unknown start: stays black
-                    pp["charge"].value = prog
-                    pp["padR"].value = 37.8 if is_big else 20.8
-                    self.pad_vaos_rl[self._pad_vaos[2 * is_big]].render(moderngl.TRIANGLES)
+                    inst[2 * is_big].append((x_, y_, 0.0, 0.0, prog, 37.8 if is_big else 20.8))
                     g_ = 0.0
                     if pt is not None:
                         g_win = 1.2 if is_big else 0.7
@@ -2578,6 +2659,12 @@ class RSVRenderer:
                     glows.append((x_, y_, is_big, False, prog, g_))
                     if pt is not None:
                         recharging.append((i, (x_, y_, 40.0), prog))
+            for k_, rows in enumerate(inst):
+                if rows:
+                    name = self._pad_vaos[k_]
+                    self._pad_inst_buf[name].write(np.asarray(rows, "f4").tobytes())
+                    self._pad_inst_vao[name].render(moderngl.TRIANGLES, instances=len(rows))
+            pp["instanced"].value = 0
             self.fx.pad_glows(glows, now_p)
             self.audio.update_pad_respawn(recharging)
             self._pad_ghosts = ghosts            # translucent: drawn after the sky (see _render_pad_ghosts)
@@ -2878,10 +2965,15 @@ class RSVRenderer:
             if not flipping:
                 return
             ribs = self._corner_ribs[i] = [RibbonEmitter() for _ in self.car_streak_points]
-        left = fastvec.cross(car_up, car_forward)
+        fx_, fy_, fz_ = float(car_forward[0]), float(car_forward[1]), float(car_forward[2])
+        ux_, uy_, uz_ = float(car_up[0]), float(car_up[1]), float(car_up[2])
+        lx_, ly_, lz_ = uy_ * fz_ - uz_ * fy_, uz_ * fx_ - ux_ * fz_, ux_ * fy_ - uy_ * fx_
+        px_, py_, pz_ = float(car_pos[0]), float(car_pos[1]), float(car_pos[2])
+        zero = (0.0, 0.0, 0.0)
         for rib, (cx, cy, cz) in zip(ribs, self.car_streak_points):
-            p = car_pos + car_forward * cx + left * cy + car_up * cz
-            rib.update(flipping, 0, Vector3(p), Vector3((0.0, 0.0, 0.0)), self.FLIP_STREAK_LIFE, delta_time)
+            p = (px_ + fx_ * cx + lx_ * cy + ux_ * cz, py_ + fy_ * cx + ly_ * cy + uy_ * cz,
+                 pz_ + fz_ * cx + lz_ * cy + uz_ * cz)
+            rib.update(flipping, 0, p, zero, self.FLIP_STREAK_LIFE, delta_time)
             if teleported:
                 rib.points.clear()
             if len(rib.points) > 1:
@@ -2890,6 +2982,11 @@ class RSVRenderer:
             del self._corner_ribs[i]
 
     def _update_ball_trail(self, state, ball_phys, ball_pos, interp_ratio, delta_time):
+        if not int(getattr(self.config, "gfx_ball_trail", 1)):
+            if self.ball_trail.points:
+                self.ball_trail.points.clear()
+            self._ball_trail_on = False
+            return
         team = rl_events.g_detector.last_touch_team
         hidden = getattr(state, "ball_hidden", False)
         usable = not hidden and team is not None and state.gamemode != "heatseeker"
@@ -3310,15 +3407,22 @@ class _ProgPair:
 
     def __init__(self, *progs):
         self.progs = progs
+        self._cache = {}
 
     def __contains__(self, k):
-        return any(k in p for p in self.progs)
+        u = self._cache.get(k)
+        if u is None:
+            return any(k in p for p in self.progs)
+        return True
 
     def __getitem__(self, k):
-        us = [p[k] for p in self.progs if k in p]
-        if not us:
-            raise KeyError(k)
-        return _ProgPair._U(us)
+        u = self._cache.get(k)
+        if u is None:
+            us = [p[k] for p in self.progs if k in p]
+            if not us:
+                raise KeyError(k)
+            u = self._cache[k] = _ProgPair._U(us)
+        return u
 
 
 class FramePacer:

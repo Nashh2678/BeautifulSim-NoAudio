@@ -147,25 +147,25 @@ void main() {
     vec2 q = gl_PointCoord * 2.0 - 1.0;
     float a0 = v_seed * 6.2831853;
     q = mat2(cos(a0), sin(a0), -sin(a0), cos(a0)) * q;
-    // big lumps (a few per puff: the cone noise sampled coarsely) -> the game's lumpy "liquid gold" blobs
-    vec2 uv = q * 0.085 + vec2(fract(v_seed * 7.13), fract(v_seed * 3.71));
-    // the outline wobbles (distortion), most in the middle of the puff's life
-    vec2 w = vec2(texture(coneTex, uv * 0.6 + 0.31).r, texture(coneTex, uv * 0.6 + 0.67).r) - 0.33;
-    q += w * 0.05 * v_dist;
+    // one RGBA noise texture: r = medium lumps, g = fine grain, ba = a smooth warp field -> 2 fetches per pixel
+    float r0 = dot(q, q);
+    if (r0 > 1.0) discard;
+    vec2 o = vec2(fract(v_seed * 7.13), fract(v_seed * 3.71));
+    vec4 nw = texture(coneTex, q * 0.066 + o);
+    q += (nw.ba - 0.5) * 0.12 * v_dist;                  // the outline wobbles (DistortionAmount curve)
     float r = length(q);
-    if (r > 1.0) discard;
-    float n = texture(coneTex, uv + w * 0.01 * v_dist).r;
-    // a round body whose edge is eaten into lumps while NoiseAmount is high; crisp edge
-    float body = (1.0 - r) * 1.5 - v_noise * (0.5 - n) * 0.9;
-    float dens = smoothstep(0.02, 0.16, body);
-    float a = dens * v_alpha;
+    vec4 nd = texture(coneTex, q * 0.11 + o * 1.7);
+    float nm = nd.r, nf = nd.g;
+    float body = (1.0 - r) * 1.25 - (0.5 - nm) * (0.35 + 0.55 * v_noise) - (0.5 - nf) * 0.35;
+    float dens = smoothstep(0.0, 0.55, body);          // soft: overlapping puffs build up into one smoky flame
+    float a = min(dens * v_alpha * 1.05, 1.0);
     if (a < 0.004) discard;
     // CoreColor (2.5, 1, 0.125) x Brightness (HDR) through an exposure tone curve like the game's: the thick middle
-    // of a puff over-exposes to pale yellow, its thin rim stays deep orange
-    float inner = smoothstep(0.05, 0.75, body);
-    vec3 hdr = vec3(2.5, 1.0, 0.125) * v_bright * (0.35 + 1.7 * inner);
-    vec3 col = 1.0 - exp(-hdr * 1.15);
-    f_color = vec4(col * a, a * 0.9);                  // premultiplied, nearly opaque "over" (a touch additive)
+    // over-exposes to pale yellow, the thin wisps stay deep orange
+    float inner = smoothstep(0.1, 0.9, body);
+    vec3 hdr = vec3(2.5, 1.0, 0.125) * v_bright * (0.25 + 1.8 * inner) * (0.8 + 0.4 * nf);
+    vec3 col = 1.0 - exp(-hdr * 1.05);
+    f_color = vec4(col * a, a * 0.93);                 // premultiplied "over", a touch additive (glow)
 }
 """
 
@@ -185,6 +185,25 @@ def _cone_noise(n=256, count=2600, seed=7):
         v = h0 * np.clip(1.0 - np.sqrt(dx * dx + dy * dy) / r0, 0.0, 1.0)
         img[np.ix_(ys, xs)] = np.maximum(img[np.ix_(ys, xs)], v)
     return (img * 255).astype("u1")
+
+
+def _puff_noise(n=256):
+    """RGBA puff noise, tileable: r = cone lumps, g = the same pattern 3x finer, b / a = two smooth warp fields."""
+    cones = _cone_noise(n).astype("f4") / 255.0
+    fine = np.tile(cones[::3, ::3] if n % 3 == 0 else cones[::2, ::2], (3, 3))[:n, :n]
+    rng = np.random.default_rng(3)
+
+    def smooth(k):
+        g = rng.random((k, k)).astype("f4")
+        # bilinear upsample (tileable)
+        x = np.arange(n) * k / n
+        i0 = np.floor(x).astype(int) % k; i1 = (i0 + 1) % k; f = (x - np.floor(x))[None, :]
+        rows = g[:, i0] * (1 - f) + g[:, i1] * f
+        fy = (x - np.floor(x))[:, None]
+        return rows[i0, :] * (1 - fy) + rows[i1, :] * fy
+
+    out = np.stack([cones, fine, smooth(8), smooth(8)], -1)
+    return (np.clip(out, 0, 1) * 255).astype("u1")
 
 
 # Goal shock sphere: glowing rim (fresnel), clear in the middle, additive
@@ -330,10 +349,21 @@ class ParticlePool:
     def pos(self):
         return self.a[:, self.P]
 
+    keep_frac = 1.0                                # settings: Particles quality (fraction of multi-particle bursts)
+
     def spawn(self, pos, vel, life, s0, s1, c0, c1, drag=0.0, grav=0.0):
         k = len(pos)
         if k == 0:
             return
+        if k > 1 and self.keep_frac < 1.0:          # thin bursts (single glows / flashes always stay)
+            m = np.random.random(k) < self.keep_frac
+            if not m.any():
+                return
+            pick1 = lambda x: x[m] if (np.ndim(x) == 1 and len(x) == k) else x      # per-particle scalars
+            pick2 = lambda x: x[m] if np.ndim(x) == 2 else x                           # per-particle vectors / colours
+            pos, vel, c0, c1 = (pick2(np.asarray(x)) for x in (pos, vel, c0, c1))
+            life, s0, s1, drag, grav = (pick1(np.asarray(x)) for x in (life, s0, s1, drag, grav))
+            k = len(pos)
         if self.n + k > self.cap:                  # full: drop the oldest particles
             drop = min(self.n, self.n + k - self.cap)
             self.a[:self.n - drop] = self.a[drop:self.n]
@@ -413,16 +443,19 @@ class FX:
         self.shells = []                           # goal shock spheres: [pos, age, life, r0, r1, col, alpha]
         self._rng = np.random.default_rng()
         self.trail_prog = ctx.program(vertex_shader=TRAIL_VERT, fragment_shader=TRAIL_FRAG)
-        self.trail_vbo = ctx.buffer(reserve=8192 * 7 * 4, dynamic=True)
+        self.TRAIL_MAX = 49152
+        self.trail_vbo = ctx.buffer(reserve=self.TRAIL_MAX * 7 * 4, dynamic=True)
         self.trail_vao = ctx.vertex_array(self.trail_prog, [(self.trail_vbo, "3f 4f", "in_pos", "in_col")])
         self._pad_glow = None
         self._pad_charge = []
         self._trails = []
         self._tubes = []
         self.tube_prog = ctx.program(vertex_shader=TUBE_VERT, fragment_shader=TUBE_FRAG)
-        self.tube_vbo = ctx.buffer(reserve=4096 * 8 * 4, dynamic=True)
+        self.TUBE_MAX = 24576
+        self.tube_vbo = ctx.buffer(reserve=self.TUBE_MAX * 8 * 4, dynamic=True)
         self.tube_vao = ctx.vertex_array(self.tube_prog, [(self.tube_vbo, "3f 4f 1f", "in_pos", "in_col", "in_u")])
         self._beams = []
+        self._beam_blocks = []
         self.flame_prog = ctx.program(vertex_shader=FLAME_VERT, fragment_shader=FLAME_FRAG)
         fm = _flame_mesh()
         self.flame_vao = ctx.vertex_array(self.flame_prog, [(ctx.buffer(fm.tobytes()), "2f", "in_sa")])
@@ -440,7 +473,7 @@ class FX:
         self.puff_n = 0
         self.puff_vbo = ctx.buffer(reserve=self.PUFF_CAP * 6 * 4, dynamic=True)
         self.puff_vao = ctx.vertex_array(self.puff_prog, [(self.puff_vbo, "3f 1f 1f 1f", "in_pos", "in_t", "in_seed", "in_size")])
-        self.cone_tex = ctx.texture((256, 256), 1, _cone_noise().tobytes())
+        self.cone_tex = ctx.texture((256, 256), 4, _puff_noise().tobytes())
         self.cone_tex.build_mipmaps()
         self.cone_tex.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
         self._boost_dist = {}
@@ -539,8 +572,9 @@ class FX:
         pts = [p for p in ribbon.points if p.connected]
         if len(pts) < 2:
             return
-        pos = np.asarray([tuple(p.pos) for p in pts], "f4")
-        age = np.asarray([p.time_active for p in pts], "f4")
+        pos = np.array([p.pos for p in pts], "f4")
+        clk = ribbon.clock
+        age = np.array([clk - p.t0 for p in pts], "f4")
         self._trails.append((pos, age, lifetime, width, color, None if up is None else np.asarray(up, "f4"), flat))
 
     def add_tube(self, ribbon, lifetime, radius, color, white_from=0.0, white_len=0.0):
@@ -550,54 +584,70 @@ class FX:
         if len(pts) < 2:
             return
         base = tuple(color[:3])
-        self._tubes.append((np.asarray([tuple(p.pos) for p in pts], "f4"),
-                            np.asarray([p.time_active for p in pts], "f4"),
+        clk = ribbon.clock
+        self._tubes.append((np.array([p.pos for p in pts], "f4"),
+                            np.array([clk - p.t0 for p in pts], "f4"),
                             np.asarray([getattr(p, "k", 1.0) for p in pts], "f4"), lifetime, radius,
                             np.asarray([getattr(p, "col", None) or base for p in pts], "f4"),   # colour per point
                             float(color[3]) if len(color) > 3 else 1.0, white_from, white_len))
 
     def _render_tubes(self, m_vp_bytes, cam):
+        """All queued tubes in ONE vectorised build (no per-tube numpy calls) -> one triangle-list draw."""
         if not self._tubes:
             return
         cam = np.asarray(cam, "f4")
-        out = []
-        for pos, age, kpt, life, radius, rgb, a0, w_from, w_len in self._tubes:
-            n = len(pos)
-            seg = np.empty_like(pos)
-            seg[:-1] = pos[1:] - pos[:-1]
-            seg[-1] = seg[-2]
-            dist = np.concatenate([[0.0], np.cumsum(np.sqrt((seg[:-1] ** 2).sum(1)))]).astype("f4")
-            t = np.clip(age / life, 0.0, 1.0)
-            w = 1.0 - np.clip((dist - w_from) / max(w_len, 1e-3), 0.0, 1.0) if w_len > 0 else np.zeros(n, "f4")
-            rgba = np.empty((n, 4), "f4")
-            rgba[:, 0:3] = rgb * (1.0 - w[:, None]) + w[:, None]
-            rgba[:, 3] = a0 * (1.0 - t) * kpt              # kpt: per-point strength at emission
-            view = cam[None, :] - pos
-            side = _cross(seg, view)
-            side *= (radius * (1.0 - 0.35 * t) / (np.sqrt((side * side).sum(1)) + 1e-6))[:, None]
-            v = np.empty((2 * n, 8), "f4")
-            v[0::2, 0:3] = pos - side; v[1::2, 0:3] = pos + side
-            v[0::2, 3:7] = rgba; v[1::2, 3:7] = rgba
-            v[0::2, 7] = -1.0; v[1::2, 7] = 1.0
-            if out:                                  # degenerate bridge between tubes
-                out.append(out[-1][-1:]); out.append(v[:1])
-            out.append(v)
+        T = self._tubes
         self._tubes = []
-        data = np.concatenate(out, 0)[:4096]
+        lens = np.array([len(t[0]) for t in T])
+        pos = np.concatenate([t[0] for t in T], 0)
+        age = np.concatenate([t[1] for t in T], 0)
+        kpt = np.concatenate([t[2] for t in T], 0)
+        rgb = np.concatenate([t[5] for t in T], 0)
+        life = np.repeat([t[3] for t in T], lens).astype("f4")
+        radius = np.repeat([t[4] for t in T], lens).astype("f4")
+        a0 = np.repeat([t[6] for t in T], lens).astype("f4")
+        w_from = np.repeat([t[7] for t in T], lens).astype("f4")
+        w_len = np.repeat([t[8] for t in T], lens).astype("f4")
+        starts = np.cumsum(lens) - lens
+        ends = np.cumsum(lens) - 1
+        seg = np.empty_like(pos)
+        seg[:-1] = pos[1:] - pos[:-1]
+        seg[ends] = seg[ends - 1]
+        sl = np.sqrt((seg * seg).sum(1))
+        cs = np.concatenate([[0.0], np.cumsum(sl[:-1])]).astype("f4")
+        dist = cs - np.repeat(cs[starts], lens)                  # distance along each tube from its head
+        t = np.clip(age / life, 0.0, 1.0)
+        w = np.where(w_len > 0, 1.0 - np.clip((dist - w_from) / np.maximum(w_len, 1e-3), 0.0, 1.0), 0.0)
+        rgba = np.empty((len(pos), 4), "f4")
+        rgba[:, 0:3] = rgb * (1.0 - w[:, None]) + w[:, None]
+        rgba[:, 3] = a0 * (1.0 - t) * kpt
+        side = _cross(seg, cam[None, :] - pos)
+        side *= (radius * (1.0 - 0.35 * t) / (np.sqrt((side * side).sum(1)) + 1e-6))[:, None]
+        n = len(pos)
+        VL = np.empty((n, 8), "f4"); VH = np.empty((n, 8), "f4")
+        VL[:, 0:3] = pos - side; VH[:, 0:3] = pos + side
+        VL[:, 3:7] = rgba; VH[:, 3:7] = rgba
+        VL[:, 7] = -1.0; VH[:, 7] = 1.0
+        sid = np.repeat(np.arange(len(lens)), lens)
+        i = np.nonzero(sid[:-1] == sid[1:])[0]
+        j = i + 1
+        data = np.stack([VL[i], VH[i], VL[j], VH[i], VH[j], VL[j]], 1).reshape(-1, 8)[:self.TUBE_MAX]
         self.tube_vbo.write(data.tobytes())
         self.tube_prog["m_vp"].write(m_vp_bytes)
         self.ctx.blend_func = moderngl.ONE, moderngl.ONE_MINUS_SRC_ALPHA
         self.ctx.disable(moderngl.CULL_FACE)
-        self.tube_vao.render(moderngl.TRIANGLE_STRIP, vertices=len(data))
+        self.tube_vao.render(moderngl.TRIANGLES, vertices=len(data))
         self.ctx.enable(moderngl.CULL_FACE)
 
     def add_beam(self, p0, p1, w0, w1, c0, c1, mid=None):
         """Camera-facing tapered quad strip p0 -> (mid) -> p1 with per-end width/colour (flames)."""
-        pts = [p0, mid, p1] if mid is not None else [p0, p1]
-        n = len(pts)
-        t = np.linspace(0.0, 1.0, n, dtype="f4")[:, None]
-        self._beams.append((np.asarray(pts, "f4"), w0 + (w1 - w0) * t[:, 0],
-                            np.asarray(c0, "f4")[None, :] * (1 - t) + np.asarray(c1, "f4")[None, :] * t))
+        # plain lists -> one array each (np.linspace + broadcasting cost ~0.05 ms a beam)
+        if mid is None:
+            self._beams.append((np.array((p0, p1), "f4"), np.array((w0, w1), "f4"), np.array((c0, c1), "f4")))
+        else:
+            cm = [0.5 * (a + b) for a, b in zip(c0, c1)]
+            self._beams.append((np.array((p0, mid, p1), "f4"), np.array((w0, 0.5 * (w0 + w1), w1), "f4"),
+                                np.array((c0, cm, c1), "f4")))
 
     # ---------------------------------------------------------------------------------------- #
     def _rand_dirs(self, k):
@@ -610,7 +660,15 @@ class FX:
     STREAM_OFFSET = 10.0             # the two streams leave the exhaust this far to each side
     PUFF_SPACING = 32.0              # the game's SpawnPerUnit: one puff per 32 uu the exhaust travels
 
+    def set_quality(self, level):
+        """Particles quality 0 / 1 / 2 -> fraction of burst particles and boost puffs kept."""
+        f = (0.4, 0.7, 1.0)[max(0, min(2, int(level)))]
+        self.add.keep_frac = self.alpha.keep_frac = f
+        self.puff_keep = (0.55, 0.8, 1.0)[max(0, min(2, int(level)))]
+
     def _add_puffs(self, pts):
+        if getattr(self, "puff_keep", 1.0) < 1.0 and len(pts) > 1:
+            pts = pts[np.random.random(len(pts)) < self.puff_keep]
         k = len(pts)
         if k == 0:
             return
@@ -626,7 +684,8 @@ class FX:
         self.puff_age[n:n + k] = 0.0
         self.puff_seed[n:n + k] = self._rng.uniform(0.0, 1.0, k)
         self.puff_acc[n:n + k] = self._rng.uniform(15.0, 30.0, k)    # the game's Acceleration: z 15..30 uu/s^2
-        self.puff_size[n:n + k] = self._rng.uniform(35.0, 50.0, k)   # the boost actor's ParticleSize: 35..50 uu
+        # the boost actor's ParticleSize 35..50 uu, x1.35: our soft, wispy edge shows less of the sprite than the game's
+        self.puff_size[n:n + k] = self._rng.uniform(35.0, 50.0, k) * 1.35
         self.puff_n = n + k
 
     def boost(self, key, pos, fwd, up, car_vel, team, dt, model_bytes=None):
@@ -640,11 +699,27 @@ class FX:
         cv = np.asarray(car_vel, "f4")
         rng = self._rng
         fl = float(rng.uniform(0.9, 1.1))
-        # nozzle: orange glow + white-hot core (attached to the car)
-        self.add.spawn(base[None, :], cv[None, :], np.array([0.02], "f4"), np.array([55.0 * fl], "f4"), 50.0,
-                       np.array([1.0, 0.45, 0.05, 0.45], "f4"), np.array([1.0, 0.35, 0.02, 0.0], "f4"))
-        self.add.spawn(base[None, :], cv[None, :], np.array([0.02], "f4"), np.array([20.0 * fl], "f4"), 16.0,
-                       np.array([1.0, 0.92, 0.6, 0.9], "f4"), np.array([1.0, 0.7, 0.3, 0.0], "f4"))
+        # the game's boost mesh: two glowing flame cones out of the exhaust (drawn in _render_flames)
+        if model_bytes is not None:
+            self._flames.append((model_bytes, (1.0, 0.86, 0.45), (1.0, 0.52, 0.10)))
+        # HotSourceSize 8 / GlowSize 45: a white-hot core and a gold glow on the exhaust; the lens flare (inner cone
+        # 40 deg, outer 170 deg around the exhaust's axis) -> a big soft glow that is strongest seen from behind
+        facing = 0.0
+        cam = getattr(self, "cam_pos", None)
+        if cam is not None:
+            dc = np.asarray(cam, "f4") - base
+            ld = float(np.linalg.norm(dc))
+            if ld > 1.0:
+                cosang = float(np.dot(-fwd, dc)) / ld
+                ang = math.degrees(math.acos(max(-1.0, min(1.0, cosang))))
+                facing = 1.0 - min(1.0, max(0.0, (ang - 20.0) / 65.0))
+        self.add.spawn(base[None, :], cv[None, :], np.array([0.02], "f4"), np.array([90.0 * fl], "f4"), 80.0,
+                       np.array([1.0, 0.55, 0.10, 0.40 + 0.25 * facing], "f4"), np.array([1.0, 0.4, 0.05, 0.0], "f4"))
+        self.add.spawn(base[None, :], cv[None, :], np.array([0.02], "f4"), np.array([18.0 * fl], "f4"), 16.0,
+                       np.array([1.0, 0.95, 0.75, 1.0], "f4"), np.array([1.0, 0.8, 0.4, 0.0], "f4"))
+        if facing > 0.0:
+            self.add.spawn(base[None, :], cv[None, :], np.array([0.02], "f4"), np.array([230.0], "f4"), 220.0,
+                           np.array([1.0, 0.62, 0.18, 0.22 * facing], "f4"), np.array([1.0, 0.5, 0.1, 0.0], "f4"))
         self.nozzle_flares.append((base.copy(), fl))
         right = np.array([fwd[1] * up[2] - fwd[2] * up[1], fwd[2] * up[0] - fwd[0] * up[2],
                           fwd[0] * up[1] - fwd[1] * up[0]], "f4")
@@ -675,7 +750,7 @@ class FX:
         f = ((np.arange(1, k + 1, dtype="f4") * self.PUFF_SPACING - d0) / max(L, 1e-3)).clip(0.0, 1.0)
         pts = []
         for side in (-1.0, 1.0):
-            cnt = np.floor(rng.uniform(0.0, 4.0, k) + rng.uniform(0.0, 1.0, k)).astype(int)   # E = 2 per step
+            cnt = rng.integers(1, 4, k)                          # 1..3 per 32 uu step: continuous, lumpy
             ff = np.repeat(f, cnt)
             if len(ff) == 0:
                 continue
@@ -683,7 +758,16 @@ class FX:
             pts.append(prev[None, :] + seg[None, :] * ff + right[None, :] * (side * self.STREAM_OFFSET)
                        + rng.normal(0.0, 2.0, (len(ff), 3)).astype("f4"))
         if pts:
-            self._add_puffs(np.concatenate(pts, 0))
+            pts = np.concatenate(pts, 0)
+            self._add_puffs(pts)
+            # embers: tiny bright sparks sprinkled through the flame, drifting out and up, twinkling out
+            ke = min(len(pts) * 2, 40)
+            if ke:
+                src = pts[rng.integers(0, len(pts), ke)] + rng.normal(0.0, 9.0, (ke, 3)).astype("f4")
+                d = self._rand_dirs(ke)
+                self.add.spawn(src, d * rng.uniform(15.0, 70.0, (ke, 1)).astype("f4") + np.array([0, 0, 25.0], "f4"),
+                               rng.uniform(0.3, 0.9, ke).astype("f4"), rng.uniform(2.2, 4.0, ke).astype("f4"), 1.0,
+                               np.array([1.0, 0.95, 0.65, 1.0], "f4"), np.array([1.0, 0.55, 0.1, 0.0], "f4"), drag=1.5)
 
     def boost_end(self, key):
         """The car stopped boosting: the next boost starts a new puff trail right at the nozzle."""
@@ -746,7 +830,7 @@ class FX:
         for model_bytes, hot, flame in self._flames:
             fp["m_model"].write(model_bytes)
             fl = 0.92 + 0.16 * math.sin(t * 53.0) * math.sin(t * 31.0)
-            for L, R0, gain, h, f in ((150.0 * fl, 13.0, 1.0, hot, flame), (65.0 * fl, 6.0, 1.2, (1.0, 1.0, 1.0), hot)):
+            for L, R0, gain, h, f in ((95.0 * fl, 12.0, 0.85, hot, flame), (48.0 * fl, 6.0, 1.3, (1.0, 1.0, 1.0), hot)):
                 fp["L"].value = L
                 fp["R0"].value = R0
                 fp["gain"].value = gain
@@ -1053,7 +1137,7 @@ class FX:
 
     def _render_trails(self, m_vp_bytes, cam):
         """All queued trails + flame beams -> ONE vectorised strip build and ONE draw."""
-        if not self._trails and not self._beams:
+        if not self._trails and not self._beams and not self._beam_blocks:
             return
         cam = np.asarray(cam, "f4")
         P, Wd, C, UP = [], [], [], []
@@ -1073,12 +1157,18 @@ class FX:
             P.append(pos); Wd.append(wd); C.append(rgba)
             UP.append(None if up is None else np.repeat(up[None, :], len(pos), 0))
             FL.append(bool(flat))
+        lens = [len(p) for p in P]
         for pos, width, rgba in self._beams:
-            P.append(pos); Wd.append(np.broadcast_to(np.asarray(width, "f4"), (len(pos),)).copy()); C.append(rgba); UP.append(None)
-            FL.append(False)
+            P.append(pos); Wd.append(np.broadcast_to(np.asarray(width, "f4"), (len(pos),))); C.append(rgba)
+            lens.append(len(pos))
+        for pos, width, rgba in self._beam_blocks:           # (n, m, ...) = n strips of m points at once
+            n_, m_ = pos.shape[0], pos.shape[1]
+            P.append(pos.reshape(-1, 3)); Wd.append(width.reshape(-1)); C.append(rgba.reshape(-1, 4))
+            lens.extend([m_] * n_)
         self._trails = []
         self._beams = []
-        lens = np.array([len(p) for p in P])
+        self._beam_blocks = []
+        lens = np.array(lens)
         pos = np.concatenate(P, 0); wid = np.concatenate(Wd, 0).astype("f4"); rgba = np.concatenate(C, 0)
         # per-point segment direction (last point of each strip reuses its previous segment)
         seg = np.empty_like(pos)
@@ -1093,7 +1183,7 @@ class FX:
         lo = pos - side; hi = pos + side
         rgba_hi = rgba.copy()
         off = 0
-        for k, u in enumerate(UP):                   # upright strips: base on the surface, tip along car-up
+        for k, u in enumerate(UP):                   # (trails only; beams follow) upright: base on surface, tip along up
             nk = lens[k]
             if u is not None and FL[k]:          # flat on the surface: side = seg x up
                 sg = seg[off:off + nk]
@@ -1106,24 +1196,21 @@ class FX:
                 hi[off:off + nk] = pos[off:off + nk] + u * wid[off:off + nk, None]
                 rgba_hi[off:off + nk, 3] *= 0.15    # fades toward the tips
             off += nk
-        v = np.empty((2 * len(pos), 7), "f4")
-        v[0::2, 0:3] = lo; v[1::2, 0:3] = hi
-        v[0::2, 3:7] = rgba; v[1::2, 3:7] = rgba_hi
-        # stitch strips with degenerate bridges: repeat last vertex of strip k and first of strip k+1
-        starts2 = 2 * (np.cumsum(lens) - lens)
-        ends2 = 2 * np.cumsum(lens) - 1
-        pieces = []
-        for k in range(len(lens)):
-            if k:
-                pieces.append(v[ends2[k - 1]:ends2[k - 1] + 1]); pieces.append(v[starts2[k]:starts2[k] + 1])
-            pieces.append(v[starts2[k]:ends2[k] + 1])
-        data = np.concatenate(pieces, 0)[:8192]
+        # one triangle list: two triangles per segment between consecutive points of the same strip
+        n = len(pos)
+        VL = np.empty((n, 7), "f4"); VH = np.empty((n, 7), "f4")
+        VL[:, 0:3] = lo; VH[:, 0:3] = hi
+        VL[:, 3:7] = rgba; VH[:, 3:7] = rgba_hi
+        sid = np.repeat(np.arange(len(lens)), lens)
+        i = np.nonzero(sid[:-1] == sid[1:])[0]
+        j = i + 1
+        data = np.stack([VL[i], VH[i], VL[j], VH[i], VH[j], VL[j]], 1).reshape(-1, 7)[:self.TRAIL_MAX]
         self.trail_vbo.write(data.tobytes())
         self.trail_prog["m_vp"].write(m_vp_bytes)
         # premultiplied "over" (not additive): a blue trail stays blue on green turf instead of turning teal
         self.ctx.blend_func = moderngl.ONE, moderngl.ONE_MINUS_SRC_ALPHA
         self.ctx.disable(moderngl.CULL_FACE)
-        self.trail_vao.render(moderngl.TRIANGLE_STRIP, vertices=len(data))
+        self.trail_vao.render(moderngl.TRIANGLES, vertices=len(data))
         self.ctx.enable(moderngl.CULL_FACE)
 
     def render(self, m_vp_bytes, px_scale, cam_pos=(0.0, 0.0, 0.0)):

@@ -47,22 +47,55 @@ class Config:
 
     # Graphics (Edit Settings > Graphics): name -> (label, [(value, shown text), ...], default)
     GRAPHICS = {
+        "gfx_preset": ("Quality preset", [("custom", "Custom"), ("low", "Low"), ("medium", "Medium"), ("high", "High")],
+                       "custom"),
         "gfx_aa": ("Anti-aliasing (MSAA)", [(0, "Off"), (2, "2x"), (4, "4x"), (8, "8x")],
                    int(os.environ.get("RSV_MSAA", "4"))),
         "gfx_resolution": ("Resolution", [("auto", "Balanced (max 2.1 MP, upscaled)"), ("native", "Native"),
                                           ("150", "Supersampled 1.5x"), ("200", "Supersampled 2x")], "auto"),
-        "gfx_grass": ("3D grass", [(0, "Off"), (1, "Low"), (2, "Medium"), (3, "High")], 2),
+        "gfx_shadows": ("Shadows", [(1, "On"), (0, "Off")], 1),
+        "gfx_ball_trail": ("Ball trail", [(1, "On"), (0, "Off")], 1),
+        "gfx_ball_marker": ("Ball circles", [(1, "On"), (0, "Off")], 1),
         "gfx_detail": ("Distant detail", [("smooth", "Smooth"), ("sharp", "Sharp (may shimmer)")], "smooth"),
         "gfx_vsync": ("VSync", [(1, "On"), (0, "Off")], int(os.environ.get("RSV_VSYNC", "1"))),
         "gfx_fps": ("Frame rate cap", [(0, "Monitor refresh"), (60, "60"), (120, "120"), (144, "144"),
                                        (240, "240"), (-1, "Unlimited")], 0),
     }
 
+    # Visual quality sliders (Edit Settings > Graphics): name -> (label, level names, default level index)
+    QUALITY = {
+        "q_shadow": ("Shadow quality", ["Low", "Medium", "High"], 2),
+        "q_crowd": ("Crowd", ["Low", "Medium", "High"], 2),
+        "q_map": ("Map detail", ["Low", "Medium", "High"], 2),
+        "gfx_grass": ("Grass", ["Off", "Low", "Medium", "High"], 2),
+        "q_particles": ("Particles", ["Low", "Medium", "High"], 2),
+    }
+    # Low = 165 fps on the laptop's integrated GPU (Radeon 780M), High = everything maxed
+    PRESETS = {
+        "low": {"gfx_aa": 2, "q_shadow": 0, "q_crowd": 0, "q_map": 0, "gfx_grass": 0, "q_particles": 0},
+        "medium": {"gfx_aa": 4, "q_shadow": 1, "q_crowd": 1, "q_map": 1, "gfx_grass": 1, "q_particles": 1},
+        "high": {"gfx_aa": 8, "q_shadow": 2, "q_crowd": 2, "q_map": 2, "gfx_grass": 3, "q_particles": 2},
+    }
+
+    def apply_preset(self, name):
+        for k, v in self.PRESETS.get(name, {}).items():
+            setattr(self, k, v)
+        self.gfx_preset = name if name in self.PRESETS else "custom"
+
+    def matching_preset(self):
+        for name, vals in self.PRESETS.items():
+            if all(getattr(self, k) == v for k, v in vals.items()):
+                return name
+        return "custom"
+
     def __init__(self):
         gfx = self._load().get("graphics", {})
         for name, (_label, choices, d) in self.GRAPHICS.items():
             v = gfx.get(name, d)
             setattr(self, name, v if v in [c[0] for c in choices] else d)
+        for name, (_label, levels, d) in self.QUALITY.items():
+            v = gfx.get(name, d)
+            setattr(self, name, v if isinstance(v, int) and 0 <= v < len(levels) else d)
         saved = self._load().get("camera", {})
         for name, (d, lo, hi, dec) in self.CAMERA.items():
             v = saved.get(name, d)
@@ -94,7 +127,7 @@ class Config:
         cur["camera"] = {name: getattr(self, name).val for name in self.CAMERA}
         cur["volume"] = round(self.volume.val / 100.0, 3)
         cur["sound_mix"] = {name: round(getattr(self, name).val) for name in self.SOUND_MIX}
-        cur["graphics"] = {name: getattr(self, name) for name in self.GRAPHICS}
+        cur["graphics"] = {name: getattr(self, name) for name in list(self.GRAPHICS) + list(self.QUALITY)}
         try:
             tmp = SETTINGS_PATH + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:

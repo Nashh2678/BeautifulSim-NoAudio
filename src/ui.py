@@ -137,6 +137,51 @@ class QConfigChoice(QWidget):
         if self.on_change is not None:
             self.on_change()
 
+    def refresh(self):
+        """Show the config's current value (after a preset changed it) without re-triggering on_change."""
+        self.combo.blockSignals(True)
+        self.combo.setCurrentIndex([c[0] for c in self.choices].index(getattr(self.config, self.name)))
+        self.combo.blockSignals(False)
+
+
+class QConfigLevel(QWidget):
+    """A labelled Low / Medium / High (...) slider for one Config.QUALITY entry (a level index on Config)."""
+
+    def __init__(self, config: Config, name: str, on_change=None):
+        QWidget.__init__(self)
+        self.setAttribute(Qt.WA_StyledBackground)
+        self.setAutoFillBackground(True)
+        self.config, self.name = config, name
+        self.title, self.levels, _d = Config.QUALITY[name]
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setAlignment(Qt.AlignTop)
+        self.label = QtWidgets.QLabel()
+        lay.addWidget(self.label)
+        self.slider = QtWidgets.QSlider(Qt.Horizontal, self)
+        self.slider.setFocusPolicy(Qt.NoFocus)          # keys keep going to the vis
+        self.slider.setRange(0, len(self.levels) - 1)
+        self.slider.setPageStep(1)
+        self.slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        self.slider.setTickInterval(1)
+        lay.addWidget(self.slider)
+        self.on_change = on_change
+        self.refresh()
+        self.slider.valueChanged.connect(self.on_changed)
+
+    def refresh(self):
+        v = int(getattr(self.config, self.name))
+        self.slider.blockSignals(True)
+        self.slider.setValue(v)
+        self.slider.blockSignals(False)
+        self.label.setText("%s: %s" % (self.title, self.levels[v]))
+
+    @pyqtSlot(int)
+    def on_changed(self, v):
+        setattr(self.config, self.name, int(v))
+        self.label.setText("%s: %s" % (self.title, self.levels[int(v)]))
+        if self.on_change is not None:
+            self.on_change()
+
 
 class QEditConfigWidget(QWidget):
     SIZE = (300, 640)
@@ -201,8 +246,31 @@ class QEditConfigWidget(QWidget):
         self.gfx_group = QtWidgets.QGroupBox("Graphics")
         self.gfx_group_layout = QtWidgets.QVBoxLayout()
         self.gfx_group.setLayout(self.gfx_group_layout)
+        # a quality preset sets every slider below (+ anti-aliasing); moving any of them afterwards shows "Custom"
+        self._gfx_widgets = {}
+
+        def on_preset():
+            self.config.apply_preset(self.config.gfx_preset)
+            for w in self._gfx_widgets.values():
+                w.refresh()
+            self.config.save()
+
+        def on_setting():
+            self.config.gfx_preset = self.config.matching_preset()
+            self._gfx_widgets["gfx_preset"].refresh()
+            self.config.save()
+
         for name in Config.GRAPHICS:
-            self.gfx_group_layout.addWidget(QConfigChoice(self.config, name, on_change=self.config.save))
+            w = QConfigChoice(self.config, name, on_change=on_preset if name == "gfx_preset" else on_setting)
+            self._gfx_widgets[name] = w
+            self.gfx_group_layout.addWidget(w)
+        vq = QtWidgets.QLabel("Visual quality")
+        vq.setStyleSheet("font-weight: bold; margin-top: 6px")
+        self.gfx_group_layout.addWidget(vq)
+        for name in Config.QUALITY:
+            w = QConfigLevel(self.config, name, on_change=on_setting)
+            self._gfx_widgets[name] = w
+            self.gfx_group_layout.addWidget(w)
         self.body.addWidget(self.gfx_group)
 
         self.footer_label = QtWidgets.QLabel("\n(Same meaning as Rocket League's camera settings;\n"
