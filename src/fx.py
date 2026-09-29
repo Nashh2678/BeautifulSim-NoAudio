@@ -73,15 +73,138 @@ void main() {
     vec3 n = normalize(v_n);
     vec3 V = normalize(camPos - v_p);
     float ndv = dot(n, V);
-    float front = step(0.0, ndv);
-    ndv = abs(ndv);
-    // a glowing shell: white-hot yellow where it faces the camera and toward its top, orange toward the rim
-    vec3 col = mix(vec3(1.0, 0.42, 0.03), vec3(1.0, 0.82, 0.38), clamp(ndv * 0.85 + n.z * 0.35 - 0.1, 0.0, 1.0));
-    float a = alpha * mix(0.30, 1.0, pow(ndv, 0.7)) * mix(0.25, 1.0, front);
-    a *= smoothstep(0.0, 0.12, n.z) * 0.6 + 0.4;          // softer where it meets the ground
-    // premultiplied, partly covering what is behind: stays orange-yellow on green turf / blue walls (purely additive
-    // it turned lime on the grass)
-    f_color = vec4(col * a * 1.15, a * 0.75);
+    if (ndv < 0.0) discard;                              // front shell only
+    // a volume of light, not a surface: brightest where the view crosses the most of it (the middle), fading to
+    // NOTHING at the silhouette and softly toward the ground
+    float thick = smoothstep(0.0, 1.0, ndv);
+    thick *= thick;
+    vec3 col = mix(vec3(1.0, 0.45, 0.04), vec3(1.0, 0.86, 0.45), thick);
+    float a = alpha * thick * smoothstep(0.0, 0.4, n.z);   // no hard line where it meets the ground either
+    f_color = vec4(col * a, a * 0.8);           // mostly covers the turf (additive yellow over green read as lime)
+}
+"""
+
+# Alpha Boost flame puffs, rebuilt from the game's own particle system (TAGame Boost_AlphaReward_SF.upk,
+# Boost_PS "Flame" emitter + LiquidGold_02 material parameters). Every curve below is the game's lookup table sampled at
+# t = k/20 of the puff's 1 s life:
+#   size        StartSize 75 uu x SizeMultiplyLife (pops to half size in 5% of its life, full by ~55%)
+#   alpha       ColorScaleOverLife: fades IN over the first ~35%, 0.5 at 80%, gone at 100%
+#   colour      CoreColor (2.5, 1.0, 0.125) x Brightness (0 -> 1 at 25% -> 0.5): over-bright orange that clips to a yellow
+#               core and stays orange where the puff is thin
+#   noise       NoiseAmount 1 -> 0.1 by mid-life: lumpy "popcorn" blobs early, smooth round puffs later
+#   distortion  DistortionAmount 0 -> 5 at mid-life -> 0: the outline wobbles most in the middle of its life
+PUFF_VERT = """
+#version 330
+uniform mat4 m_vp;
+uniform float pxScale;
+in vec3 in_pos;
+in float in_t;
+in float in_seed;
+in float in_size;
+out float v_t;
+out float v_seed;
+out float v_alpha;
+out float v_bright;
+out float v_noise;
+out float v_dist;
+const float SZ[20] = float[20](0.048, 0.488, 0.697, 0.776, 0.823, 0.866, 0.901, 0.931, 0.955, 0.975, 0.989, 1.0,
+                               1.007, 1.012, 1.013, 1.013, 1.011, 1.008, 1.004, 1.0);
+const float AL[21] = float[21](0.0, 0.052, 0.187, 0.371, 0.572, 0.757, 0.891, 0.944, 0.934, 0.906, 0.864, 0.811, 0.751,
+                               0.686, 0.620, 0.557, 0.5, 0.392, 0.223, 0.068, 0.0);
+const float BR[21] = float[21](0.0, 0.104, 0.352, 0.648, 0.896, 1.0, 0.994, 0.976, 0.948, 0.912, 0.870, 0.824, 0.775,
+                               0.725, 0.676, 0.630, 0.588, 0.552, 0.524, 0.506, 0.5);
+const float DI[21] = float[21](0.0, 0.148, 0.548, 1.136, 1.845, 2.611, 3.367, 4.05, 4.593, 4.932, 5.001, 4.789, 4.367,
+                               3.79, 3.113, 2.389, 1.675, 1.024, 0.492, 0.132, 0.0);
+const float NO[11] = float[11](1.0, 0.975, 0.906, 0.806, 0.683, 0.55, 0.417, 0.294, 0.194, 0.125, 0.1);
+float c21(const float a[21], float t) { float x = clamp(t, 0.0, 1.0) * 20.0; int i = min(int(x), 19); return mix(a[i], a[i + 1], x - float(i)); }
+void main() {
+    float t = in_t;
+    float xs = clamp(t, 0.0, 1.0) * 19.0; int is = min(int(xs), 18);
+    float size = in_size * mix(SZ[is], SZ[is + 1], xs - float(is));
+    float xn = clamp(t, 0.0, 0.5) * 20.0; int in_ = min(int(xn), 9);
+    v_noise = mix(NO[in_], NO[in_ + 1], xn - float(in_));
+    v_alpha = c21(AL, t);
+    v_bright = c21(BR, t);
+    v_dist = c21(DI, t);
+    v_t = t;
+    v_seed = in_seed;
+    vec4 cp = m_vp * vec4(in_pos, 1.0);
+    gl_Position = cp;
+    gl_PointSize = clamp(size * pxScale / max(cp.w, 1.0), 1.0, 768.0);
+}
+"""
+PUFF_FRAG = """
+#version 330
+uniform sampler2D coneTex;      // "cones" noise: many small round bumps (like the game's Noise_Cones01_D)
+in float v_t;
+in float v_seed;
+in float v_alpha;
+in float v_bright;
+in float v_noise;
+in float v_dist;
+out vec4 f_color;
+void main() {
+    vec2 q = gl_PointCoord * 2.0 - 1.0;
+    float a0 = v_seed * 6.2831853;
+    q = mat2(cos(a0), sin(a0), -sin(a0), cos(a0)) * q;
+    // big lumps (a few per puff: the cone noise sampled coarsely) -> the game's lumpy "liquid gold" blobs
+    vec2 uv = q * 0.085 + vec2(fract(v_seed * 7.13), fract(v_seed * 3.71));
+    // the outline wobbles (distortion), most in the middle of the puff's life
+    vec2 w = vec2(texture(coneTex, uv * 0.6 + 0.31).r, texture(coneTex, uv * 0.6 + 0.67).r) - 0.33;
+    q += w * 0.05 * v_dist;
+    float r = length(q);
+    if (r > 1.0) discard;
+    float n = texture(coneTex, uv + w * 0.01 * v_dist).r;
+    // a round body whose edge is eaten into lumps while NoiseAmount is high; crisp edge
+    float body = (1.0 - r) * 1.5 - v_noise * (0.5 - n) * 0.9;
+    float dens = smoothstep(0.02, 0.16, body);
+    float a = dens * v_alpha;
+    if (a < 0.004) discard;
+    // CoreColor (2.5, 1, 0.125) x Brightness (HDR) through an exposure tone curve like the game's: the thick middle
+    // of a puff over-exposes to pale yellow, its thin rim stays deep orange
+    float inner = smoothstep(0.05, 0.75, body);
+    vec3 hdr = vec3(2.5, 1.0, 0.125) * v_bright * (0.35 + 1.7 * inner);
+    vec3 col = 1.0 - exp(-hdr * 1.15);
+    f_color = vec4(col * a, a * 0.9);                  // premultiplied, nearly opaque "over" (a touch additive)
+}
+"""
+
+
+def _cone_noise(n=256, count=2600, seed=7):
+    """Tileable 'cones' noise: random round bumps with a linear (cone) falloff, max-combined."""
+    rng = np.random.default_rng(seed)
+    img = np.zeros((n, n), "f4")
+    yy, xx = np.mgrid[0:n, 0:n].astype("f4")
+    cx = rng.uniform(0, n, count); cy = rng.uniform(0, n, count); rad = rng.uniform(2.5, 5.5, count)
+    h = rng.uniform(0.6, 1.0, count)
+    for x0, y0, r0, h0 in zip(cx, cy, rad, h):
+        x1, x2 = int(x0 - r0) - 1, int(x0 + r0) + 2
+        y1, y2 = int(y0 - r0) - 1, int(y0 + r0) + 2
+        ys = np.arange(y1, y2) % n; xs = np.arange(x1, x2) % n
+        dx = (np.arange(x1, x2) - x0)[None, :]; dy = (np.arange(y1, y2) - y0)[:, None]
+        v = h0 * np.clip(1.0 - np.sqrt(dx * dx + dy * dy) / r0, 0.0, 1.0)
+        img[np.ix_(ys, xs)] = np.maximum(img[np.ix_(ys, xs)], v)
+    return (img * 255).astype("u1")
+
+
+# Goal shock sphere: glowing rim (fresnel), clear in the middle, additive
+SHELL_FRAG = """
+#version 330
+uniform vec3 camPos;
+uniform float alpha;
+uniform vec3 col;
+in vec3 v_n;
+in vec3 v_p;
+out vec4 f_color;
+void main() {
+    vec3 n = normalize(v_n);
+    vec3 V = normalize(camPos - v_p);
+    float ndv = abs(dot(n, V));
+    // a thin bright shock front at the silhouette in the team colour, white-hot at its very edge, clear inside
+    float rim = pow(1.0 - ndv, 5.0);
+    vec3 c = mix(col * 1.25, col * 0.4 + 0.6, 0.5 * pow(rim, 4.0));
+    float a = alpha * rim;
+    f_color = vec4(c * a * 1.4, a * 0.7);        // partly "over": keeps the team colour on a bright background
 }
 """
 
@@ -287,7 +410,7 @@ class FX:
         self.flares = []                           # hit flashes: [pos, age, life, size, alpha]
         self.nozzle_flares = []
         self.domes = []                            # pad pickup glow domes: [pos, age, life, r0, r1, alpha]
-        self._pending = []                         # delayed effects: [seconds left, fn, args]
+        self.shells = []                           # goal shock spheres: [pos, age, life, r0, r1, col, alpha]
         self._rng = np.random.default_rng()
         self.trail_prog = ctx.program(vertex_shader=TRAIL_VERT, fragment_shader=TRAIL_FRAG)
         self.trail_vbo = ctx.buffer(reserve=8192 * 7 * 4, dynamic=True)
@@ -307,10 +430,28 @@ class FX:
         self._flames = []
         self.cam_right = np.array([1.0, 0.0, 0.0], "f4")
         self.cam_up = np.array([0.0, 0.0, 1.0], "f4")
+        self.puff_prog = ctx.program(vertex_shader=PUFF_VERT, fragment_shader=PUFF_FRAG)
+        self.PUFF_CAP = 2400
+        self.puff_p = np.zeros((self.PUFF_CAP, 3), "f4")
+        self.puff_age = np.zeros(self.PUFF_CAP, "f4")
+        self.puff_seed = np.zeros(self.PUFF_CAP, "f4")
+        self.puff_acc = np.zeros(self.PUFF_CAP, "f4")
+        self.puff_size = np.zeros(self.PUFF_CAP, "f4")
+        self.puff_n = 0
+        self.puff_vbo = ctx.buffer(reserve=self.PUFF_CAP * 6 * 4, dynamic=True)
+        self.puff_vao = ctx.vertex_array(self.puff_prog, [(self.puff_vbo, "3f 1f 1f 1f", "in_pos", "in_t", "in_seed", "in_size")])
+        self.cone_tex = ctx.texture((256, 256), 1, _cone_noise().tobytes())
+        self.cone_tex.build_mipmaps()
+        self.cone_tex.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+        self._boost_dist = {}
         self.dome_prog = ctx.program(vertex_shader=DOME_VERT, fragment_shader=DOME_FRAG)
         hs = _half_sphere()
         self.dome_vao = ctx.vertex_array(self.dome_prog, [(ctx.buffer(hs.tobytes()), "3f", "in_pos")])
         self.dome_n = len(hs)
+        self.shell_prog = ctx.program(vertex_shader=DOME_VERT, fragment_shader=SHELL_FRAG)
+        fs = np.concatenate([hs, hs * np.array([1.0, -1.0, -1.0], "f4")], 0)      # full sphere
+        self.shell_vao = ctx.vertex_array(self.shell_prog, [(ctx.buffer(fs.tobytes()), "3f", "in_pos")])
+        self.shell_n = len(fs)
 
     def pad_pickup(self, pos, big):
         """Boost pad picked up (RL): a glowing orange-yellow half dome over the pad (a soft sprite whose lower half the
@@ -467,59 +608,108 @@ class FX:
     ALPHA_HOT = (1.0, 0.90, 0.55)    # Alpha Boost: golden-yellow streams, white-hot orange glow at the nozzle. One look for
     ALPHA_FLAME = (1.0, 0.62, 0.08)  # both teams.
     STREAM_OFFSET = 10.0             # the two streams leave the exhaust this far to each side
-    STREAM_RATE = 44.0               # puffs per second per stream (discrete puffs with gaps, like the game)
+    PUFF_SPACING = 32.0              # the game's SpawnPerUnit: one puff per 32 uu the exhaust travels
+
+    def _add_puffs(self, pts):
+        k = len(pts)
+        if k == 0:
+            return
+        n = self.puff_n
+        if n + k > self.PUFF_CAP:                      # drop the oldest
+            drop = n + k - self.PUFF_CAP
+            keep = slice(drop, n)
+            self.puff_p[:n - drop] = self.puff_p[keep]; self.puff_age[:n - drop] = self.puff_age[keep]
+            self.puff_seed[:n - drop] = self.puff_seed[keep]; self.puff_acc[:n - drop] = self.puff_acc[keep]
+            self.puff_size[:n - drop] = self.puff_size[keep]
+            n -= drop
+        self.puff_p[n:n + k] = pts
+        self.puff_age[n:n + k] = 0.0
+        self.puff_seed[n:n + k] = self._rng.uniform(0.0, 1.0, k)
+        self.puff_acc[n:n + k] = self._rng.uniform(15.0, 30.0, k)    # the game's Acceleration: z 15..30 uu/s^2
+        self.puff_size[n:n + k] = self._rng.uniform(35.0, 50.0, k)   # the boost actor's ParticleSize: 35..50 uu
+        self.puff_n = n + k
 
     def boost(self, key, pos, fwd, up, car_vel, team, dt, model_bytes=None):
-        """Boosting car this frame (Alpha Boost look, both teams), after the game: at the exhaust a hot orange glow with
-        a thin horizontal lens streak; behind it two tidy lines of SEPARATE fire puffs -- each a ragged ball with a
-        bright yellow core and orange edges, a small satellite blob beside it -- blown back out of the exhaust, left
-        hanging in the air where they were emitted (gaps between them at speed), growing a little and burning out
-        over ~0.7 s. Emission is spread along the path the car took since the last frame."""
+        """Boosting car this frame -- Alpha Boost as the game defines it (see PUFF_VERT): a flame puff left in the
+        world every 32 uu the exhaust travels (two exhausts), which then hangs there on its own 1 s life cycle; at the
+        nozzle a small hot glow blown back out of the exhaust (the game's Drive_PS emitter: 10 sprites/s, 0.5 s, growing
+        4x, colour scale 2 -> 0) and the lens-flare streak. Same for both teams."""
         fwd = np.asarray(fwd, "f4"); up = np.asarray(up, "f4")
         pos = np.asarray(pos, "f4")
         base = pos + fwd * self.NOZZLE[0] + up * self.NOZZLE[2]
         cv = np.asarray(car_vel, "f4")
         rng = self._rng
-        fl = float(rng.uniform(0.85, 1.15))
-        # nozzle: orange glow + white-hot core (additive, re-spawned every frame = attached to the car)
-        self.add.spawn(base[None, :], cv[None, :], np.array([0.02], "f4"), np.array([62.0 * fl], "f4"), 55.0,
-                       np.array([1.0, 0.50, 0.08, 0.50], "f4"), np.array([1.0, 0.35, 0.02, 0.0], "f4"))
-        self.add.spawn(base[None, :], cv[None, :], np.array([0.02], "f4"), np.array([22.0 * fl], "f4"), 18.0,
-                       np.array([1.0, 0.95, 0.75, 0.95], "f4"), np.array([1.0, 0.75, 0.30, 0.0], "f4"))
+        fl = float(rng.uniform(0.9, 1.1))
+        # nozzle: orange glow + white-hot core (attached to the car)
+        self.add.spawn(base[None, :], cv[None, :], np.array([0.02], "f4"), np.array([55.0 * fl], "f4"), 50.0,
+                       np.array([1.0, 0.45, 0.05, 0.45], "f4"), np.array([1.0, 0.35, 0.02, 0.0], "f4"))
+        self.add.spawn(base[None, :], cv[None, :], np.array([0.02], "f4"), np.array([20.0 * fl], "f4"), 16.0,
+                       np.array([1.0, 0.92, 0.6, 0.9], "f4"), np.array([1.0, 0.7, 0.3, 0.0], "f4"))
         self.nozzle_flares.append((base.copy(), fl))
+        right = np.array([fwd[1] * up[2] - fwd[2] * up[1], fwd[2] * up[0] - fwd[0] * up[2],
+                          fwd[0] * up[1] - fwd[1] * up[0]], "f4")
+        # Drive_PS: ~10 small glowing sprites/s blown back at 50..100 uu/s, growing x4 and fading over 0.5 s
+        acc = self._boost_accum.get(("drv", key), 0.0) + 10.0 * dt
+        kd = int(acc); self._boost_accum[("drv", key)] = acc - kd
+        if kd > 0:
+            kd = min(kd, 3)
+            s0 = rng.uniform(6.5, 12.5, kd).astype("f4") * 2.0
+            v = cv[None, :] - fwd[None, :] * rng.uniform(50.0, 100.0, (kd, 1)).astype("f4") + rng.normal(0, 5.0, (kd, 3)).astype("f4")
+            self.add.spawn(np.repeat(base[None, :], kd, 0), v, np.full(kd, 0.5, "f4"), s0, float(s0.mean() * 4.0),
+                           np.array([1.0, 0.8, 0.1, 0.5], "f4"), np.array([1.0, 0.4, 0.05, 0.0], "f4"))
+        # SpawnPerUnit (UnitScalar 32 uu) x the boost actor's SpawnRate, a random 0..4 drawn per 32 uu step: on average
+        # 2 puffs per 32 uu, but bunched -- some steps drop none, others three -> the clumps and gaps of the game
         prev = self._boost_last_base.get(key)
         self._boost_last_base[key] = base.copy()
         if prev is None or float(np.linalg.norm(base - prev)) > 400.0:
             prev = base
-        right = np.array([fwd[1] * up[2] - fwd[2] * up[1], fwd[2] * up[0] - fwd[0] * up[2],
-                          fwd[0] * up[1] - fwd[1] * up[0]], "f4")
-        acc = self._boost_accum.get(key, 0.0) + self.STREAM_RATE * dt
-        k = int(acc)
-        self._boost_accum[key] = acc - k
-        k = min(k, 6)
+        seg = base - prev
+        L = float(np.linalg.norm(seg))
+        d0 = self._boost_dist.get(key, self.PUFF_SPACING)       # distance since the last step (first one at once)
+        total = d0 + L
+        k = int(total // self.PUFF_SPACING)
+        self._boost_dist[key] = total - k * self.PUFF_SPACING
         if k <= 0:
             return
-        tw = self._boost_accum.get(("t", key), 0.0) + dt
-        self._boost_accum[("t", key)] = tw
+        k = min(k, 12)
+        f = ((np.arange(1, k + 1, dtype="f4") * self.PUFF_SPACING - d0) / max(L, 1e-3)).clip(0.0, 1.0)
+        pts = []
         for side in (-1.0, 1.0):
-            f = ((np.arange(k, dtype="f4") + rng.uniform(0.0, 1.0, k).astype("f4")) / k)[:, None]
-            wob = np.sin(tw * 7.0 + side * 1.7).astype("f4") * 2.5
-            src = prev[None, :] + (base - prev)[None, :] * f + right[None, :] * (side * self.STREAM_OFFSET) + up * wob
-            j = rng.normal(0.0, 1.0, (k, 3)).astype("f4")
-            # blown straight back out of the exhaust, slowing down fast, drifting a little outward / up
-            v = cv[None, :] * 0.04 - fwd[None, :] * rng.uniform(260.0, 360.0, (k, 1)).astype("f4") + j * 12.0                 + right[None, :] * side * 14.0 + np.array([0, 0, 10.0], "f4")
-            life = rng.uniform(0.55, 0.80, k).astype("f4")
-            c0 = np.empty((k, 4), "f4"); c1 = np.empty((k, 4), "f4")
-            c0[:, :3] = np.array([1.0, 0.78, 0.20], "f4"); c0[:, 3] = 1.0
-            c1[:, :3] = np.array([1.0, 0.36, 0.03], "f4"); c1[:, 3] = 0.0
-            # negative size = flame puff (ragged, yellow core) in PARTICLE_FRAG; "over" blended so it stays golden
-            s0 = rng.uniform(20.0, 26.0, k).astype("f4")
-            self.alpha.spawn(src + j * 1.0, v, life, -s0, -44.0, c0, c1, drag=2.4)
-            # satellite blob beside each puff (the game's puffs come in little clusters)
-            off = _cross(np.repeat(fwd[None, :], k, 0), j)
-            off /= np.linalg.norm(off, axis=1, keepdims=True) + 1e-6
-            self.alpha.spawn(src + off * rng.uniform(7.0, 11.0, (k, 1)).astype("f4"), v * 0.9 + off * 18.0,
-                             life * 0.8, -s0 * 0.6, -27.0, c0, c1, drag=2.4)
+            cnt = np.floor(rng.uniform(0.0, 4.0, k) + rng.uniform(0.0, 1.0, k)).astype(int)   # E = 2 per step
+            ff = np.repeat(f, cnt)
+            if len(ff) == 0:
+                continue
+            ff = (ff + rng.uniform(-0.5, 0.5, len(ff)) * self.PUFF_SPACING / max(L, 1e-3)).clip(0.0, 1.0)[:, None]
+            pts.append(prev[None, :] + seg[None, :] * ff + right[None, :] * (side * self.STREAM_OFFSET)
+                       + rng.normal(0.0, 2.0, (len(ff), 3)).astype("f4"))
+        if pts:
+            self._add_puffs(np.concatenate(pts, 0))
+
+    def boost_end(self, key):
+        """The car stopped boosting: the next boost starts a new puff trail right at the nozzle."""
+        self._boost_last_base.pop(key, None)
+        self._boost_dist.pop(key, None)
+
+    def _render_puffs(self, m_vp_bytes, px_scale, cam_pos):
+        n = self.puff_n
+        if n == 0:
+            return
+        cam = np.asarray(cam_pos, "f4")
+        d2 = ((self.puff_p[:n] - cam[None, :]) ** 2).sum(1)
+        order = np.argsort(-d2)                          # back to front (the game sorts by distance to view)
+        buf = np.empty((n, 6), "f4")
+        buf[:, 0:3] = self.puff_p[order]
+        buf[:, 3] = self.puff_age[order]
+        buf[:, 4] = self.puff_seed[order]
+        buf[:, 5] = self.puff_size[order]
+        self.puff_vbo.write(buf.tobytes())
+        pp = self.puff_prog
+        pp["m_vp"].write(m_vp_bytes)
+        pp["pxScale"].value = float(px_scale)
+        self.cone_tex.use(location=12)
+        pp["coneTex"].value = 12
+        self.ctx.blend_func = moderngl.ONE, moderngl.ONE_MINUS_SRC_ALPHA
+        self.puff_vao.render(moderngl.POINTS, vertices=n)
 
     def _nozzle_flare_beams(self):
         for p, fl in self.nozzle_flares:
@@ -723,71 +913,52 @@ class FX:
             self._goal_explosion(pos, TEAM_GOAL[int(ev.get("team", 0)) & 1])
 
     def _goal_explosion(self, pos, col):
-        """Goal: a white-hot flash blooming into the team colour, two shock rings, a spray of sparks, then a cascade of
-        firework pops around the goal (team colour + white glitter), glitter slowly raining down and a soft tinted
-        cloud rising. GOAL_FX_SPEED slows the whole thing (speeds x v, lifetimes / v, gravity x v^2)."""
+        """Goal -- one theme, a SUPERNOVA in the scoring team's colour: a white-hot core flash, two 3D shock spheres
+        racing out (glowing at their rims, clear in the middle), a shock ring along the ground, energy sparks riding
+        the shock front, and a soft afterglow where it was.
+        GOAL_FX_SPEED slows the whole thing down (speeds x v, lifetimes / v)."""
         v = GOAL_FX_SPEED
         rng = self._rng
         col = np.asarray(col, "f4")
-        white = np.array([1.0, 1.0, 1.0], "f4")
+        hot = col * 0.35 + 0.65                                   # the colour, nearly white
         pos = np.asarray(pos, "f4")
-
-        def burst(p, n, spd, life, size, c0, c1, drag, grav, pool=None):
-            d = self._rand_dirs(n)
-            (pool or self.add).spawn(np.repeat(p[None, :], n, 0), d * rng.uniform(spd[0] * v, spd[1] * v, (n, 1)),
-                                     rng.uniform(life[0] / v, life[1] / v, n), rng.uniform(size[0], size[1], n),
-                                     size[2], c0, c1, drag=drag * v, grav=grav * v * v)
-
-        # 1) flash: white core, then the team colour bloom
-        self.add.spawn(pos[None, :], np.zeros((1, 3), "f4"), np.array([0.18 / v], "f4"), np.array([900.0], "f4"),
-                       1500.0, np.array([1.0, 1.0, 1.0, 1.0], "f4"), np.array([*col, 0.0], "f4"))
-        self.add.spawn(pos[None, :], np.zeros((1, 3), "f4"), np.array([0.45 / v], "f4"), np.array([1400.0], "f4"),
-                       2600.0 * v, np.array([*col, 0.9], "f4"), np.array([*col, 0.0], "f4"))
-        # 2) shock rings
-        self.ring(pos, (0, 1, 0), 60.0, 1700.0, 0.7 / v, 0.06, (*col, 1.0), core=(1, 1, 1))
-        self.ring(pos, (0, 0, 1), 60.0, 1400.0, 0.8 / v, 0.045, (*col, 0.8), core=(1, 1, 1), delay=0.08 / v)
-        # 3) spray of hot sparks, white -> team colour
-        burst(pos, 260, (700, 2800), (0.7, 1.6), (30, 64, 8.0), np.array([*(col * 0.45 + 0.55), 1.0], "f4"),
-              np.array([*col, 0.0], "f4"), 1.5, 380.0)
-        # 4) firework pops around the goal mouth, one after another
-        side = 1.0 if pos[1] >= 0 else -1.0
-        for i in range(7):
-            p = pos + np.array([rng.uniform(-900, 900), -side * rng.uniform(100, 900), rng.uniform(250, 1100)], "f4")
-            c = col if i % 3 else np.array([1.0, 0.85, 0.45], "f4")          # every third pop gold
-            self._pending.append([(0.12 + 0.11 * i + rng.uniform(0.0, 0.05)) / v, self._firework, (p, c)])
-        # 5) glitter slowly raining down
-        n = 160
-        d = self._rand_dirs(n); d[:, 2] = np.abs(d[:, 2]) * 1.4 + 0.3
-        self.add.spawn(np.repeat(pos[None, :], n, 0), d * rng.uniform(300 * v, 1300 * v, (n, 1)),
-                       rng.uniform(1.6 / v, 2.6 / v, n), rng.uniform(7, 12, n), 5.0,
-                       np.array([*(white * 0.6 + col * 0.4), 1.0], "f4"), np.array([*col, 0.0], "f4"),
-                       drag=2.2 * v, grav=160.0 * v * v)
-        # 6) soft team-tinted cloud rising
-        n = 26
-        d = self._rand_dirs(n); d[:, 2] = np.abs(d[:, 2])
-        self.alpha.spawn(np.repeat(pos[None, :], n, 0) + d * 120.0, d * 260.0 * v + np.array([0, 0, 200.0 * v], "f4"),
-                         rng.uniform(1.4 / v, 2.2 / v, n), 220.0, 600.0,
-                         np.array([*(col * 0.5 + 0.35), 0.22], "f4"), np.array([*(col * 0.3 + 0.4), 0.0], "f4"),
-                         drag=1.4 * v)
-
-    def _firework(self, p, c):
-        v = GOAL_FX_SPEED
-        rng = self._rng
-        c = np.asarray(c, "f4")
-        self.add.spawn(p[None, :], np.zeros((1, 3), "f4"), np.array([0.12 / v], "f4"), np.array([420.0], "f4"),
-                       700.0, np.array([*(c * 0.5 + 0.5), 0.9], "f4"), np.array([*c, 0.0], "f4"))
-        n = 120
+        # core flash (white-hot) and the afterglow it leaves
+        self.add.spawn(pos[None, :], np.zeros((1, 3), "f4"), np.array([0.22 / v], "f4"), np.array([700.0], "f4"),
+                       1300.0, np.array([1.0, 1.0, 1.0, 1.0], "f4"), np.array([*hot, 0.0], "f4"))
+        self.add.spawn(pos[None, :], np.zeros((1, 3), "f4"), np.array([1.0 / v], "f4"), np.array([420.0], "f4"),
+                       650.0, np.array([*col, 0.35], "f4"), np.array([*col, 0.0], "f4"))
+        # shock spheres (drawn in _render_shells) + the ground ring
+        self.shells.append([pos.copy(), -0.0, 0.75 / v, 80.0, 1500.0, col.copy(), 1.0])
+        self.shells.append([pos.copy(), -0.10 / v, 0.85 / v, 60.0, 1150.0, col.copy(), 0.7])
+        gp = pos.copy(); gp[2] = 4.0
+        self.ring(gp, (0, 0, 1), 80.0, 1700.0, 0.8 / v, 0.05, (*col, 0.9), core=tuple(hot))
+        # light rays out of the core
+        # energy sparks riding the shock front: one speed band so they stay on the sphere, white-hot -> team colour
+        n = 260
         d = self._rand_dirs(n)
-        sp = rng.uniform(760 * v, 880 * v, (n, 1))          # nearly one speed: a clean sphere of sparks
-        self.add.spawn(np.repeat(p[None, :], n, 0), d * sp, rng.uniform(0.9 / v, 1.4 / v, n), rng.uniform(18, 26, n),
-                       6.0, np.array([*(c * 0.6 + 0.4), 1.0], "f4"), np.array([*c, 0.0], "f4"),
-                       drag=1.7 * v, grav=240.0 * v * v)
-        # inner crackle: tiny white sparks twinkling out a moment later
-        n = 40
-        d = self._rand_dirs(n)
-        self.add.spawn(np.repeat(p[None, :], n, 0), d * rng.uniform(150 * v, 450 * v, (n, 1)),
-                       rng.uniform(0.4 / v, 0.8 / v, n), rng.uniform(8, 12, n), 2.0,
-                       np.array([1.0, 1.0, 1.0, 1.0], "f4"), np.array([1.0, 0.95, 0.8, 0.0], "f4"), drag=2.0 * v)
+        self.add.spawn(np.repeat(pos[None, :], n, 0) + d * 60.0, d * rng.uniform(2300 * v, 2700 * v, (n, 1)),
+                       rng.uniform(0.60 / v, 0.80 / v, n), rng.uniform(26, 38, n), 8.0,
+                       np.array([*hot, 1.0], "f4"), np.array([*col, 0.0], "f4"), drag=1.3 * v)
+
+    def _render_shells(self, m_vp_bytes, cam_pos):
+        if not self.shells:
+            return
+        sp = self.shell_prog
+        sp["m_vp"].write(m_vp_bytes)
+        sp["camPos"].value = tuple(float(x) for x in cam_pos)
+        self.ctx.blend_func = moderngl.ONE, moderngl.ONE_MINUS_SRC_ALPHA
+        self.ctx.disable(moderngl.CULL_FACE)
+        for c_, age, life, r0, r1, col, a0 in self.shells:
+            if age < 0.0:
+                continue
+            t = min(age / life, 1.0)
+            e = 1.0 - (1.0 - t) ** 3                               # fast out, slowing down
+            sp["center"].value = tuple(float(x) for x in c_)
+            sp["radius"].value = float(r0 + (r1 - r0) * e)
+            sp["col"].value = tuple(float(x) for x in col)
+            sp["alpha"].value = float(a0 * (1.0 - t) ** 1.6)
+            self.shell_vao.render(moderngl.TRIANGLES, vertices=self.shell_n)
+        self.ctx.enable(moderngl.CULL_FACE)
 
     def sparks(self, pos, normal, strength):
         """A hit: a small, short orange puff with a faint horizontal streak; how big / bright scales with the impact
@@ -834,15 +1005,22 @@ class FX:
         dt = min(dt, 0.1)
         self.add.update(dt)
         self.alpha.update(dt)
+        n = self.puff_n
+        if n:
+            self.puff_age[:n] += dt                       # life is exactly 1 s: age == t
+            self.puff_p[:n, 2] += self.puff_acc[:n] * self.puff_age[:n] * dt
+            alive = self.puff_age[:n] < 1.0
+            if not alive.all():
+                m = int(alive.sum())
+                self.puff_p[:m] = self.puff_p[:n][alive]; self.puff_age[:m] = self.puff_age[:n][alive]
+                self.puff_seed[:m] = self.puff_seed[:n][alive]; self.puff_acc[:m] = self.puff_acc[:n][alive]
+                self.puff_size[:m] = self.puff_size[:n][alive]
+                self.puff_n = m
         for f in self.flares:
             f[1] += dt
-        if self._pending:
-            for e in self._pending:
-                e[0] -= dt
-            due = [e for e in self._pending if e[0] <= 0.0]
-            self._pending = [e for e in self._pending if e[0] > 0.0]
-            for _, fn, a in due:
-                fn(*a)
+        for g_ in self.shells:
+            g_[1] += dt
+        self.shells = [g_ for g_ in self.shells if g_[1] < g_[2]]
         for d_ in self.domes:
             d_[1] += dt
         self.domes = [d_ for d_ in self.domes if d_[1] < d_[2]]
@@ -958,7 +1136,8 @@ class FX:
         self._render_tubes(m_vp_bytes, cam_pos)
         self._render_flames(m_vp_bytes, cam_pos)
         self._render_domes(m_vp_bytes, cam_pos)
-        if self.alpha.n or self.add.n or self._pad_glow is not None:
+        self._render_shells(m_vp_bytes, cam_pos)
+        if self.alpha.n or self.add.n or self._pad_glow is not None or self.puff_n:
             self.prog["m_vp"].write(m_vp_bytes)
             self.prog["pxScale"].value = float(px_scale)
             ctx.enable(moderngl.PROGRAM_POINT_SIZE)
@@ -971,6 +1150,8 @@ class FX:
             if na:
                 ctx.blend_func = moderngl.ONE, moderngl.ONE_MINUS_SRC_ALPHA
                 self.vao.render(moderngl.POINTS, vertices=na, first=0)
+            self._render_puffs(m_vp_bytes, px_scale, cam_pos)
+            self.prog["m_vp"].write(m_vp_bytes)
             if nb:
                 ctx.blend_func = moderngl.ONE, moderngl.ONE
                 self.vao.render(moderngl.POINTS, vertices=nb, first=na)

@@ -58,55 +58,49 @@ vec3 to_srgb(vec3 c) {
 CASTERS = '''
 uniform vec4 casters[9];
 uniform vec2 casterFwd[9];
-uniform vec3 casterF3[9];      // car forward / up (3D), for the contact occlusion
-uniform vec3 casterU3[9];
 uniform int nCasters;
 float sdRoundBox(vec2 p, vec2 b, float r) {
     vec2 q = abs(p) - b + r;
     return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
 }
-// Signed distance from world point w to caster i (car: its oriented hitbox, rounded a little; ball: its sphere).
-float casterSD(int i, vec3 w) {
-    vec3 d = w - casters[i].xyz;
-    if (casters[i].w < 80.0) {
-        vec3 F = casterF3[i], U = casterU3[i];
-        vec3 R = cross(U, F);
-        vec3 q = vec3(dot(d, F) - 13.88, dot(d, R), dot(d, U) - 20.75);    // Octane hitbox centre offset
-        vec3 e = abs(q) - vec3(55.0, 38.0, 14.0);                           // 118 x 84 x 36, minus the rounding
-        return length(max(e, 0.0)) + min(max(e.x, max(e.y, e.z)), 0.0) - 4.0;
-    }
-    return length(d) - 91.25;
-}
-// Shadow of the ball and the cars on surface point p: a soft shadow ray marched toward the light (mostly straight
-// up, a little toward the sun) against the casters' real shapes -- the shadow has the car's outline, follows its
-// orientation, lands on the curves too, and gets softer the higher the body is above the surface.
+// Shadows: every caster (ball, cars with their wheels) is rendered from the sun into its own tile of a 3x3 shadow atlas
+// (main.py _render_shadow_atlas): R = coverage, G = the caster surface's height along the light. A surface point is
+// projected along the light into its caster's tile; the shadow is the caster's real silhouette (not a box), cast in the
+// sun's direction, blurred wider the farther the caster is above the surface (soft penumbra), and only where the caster
+// is actually between the point and the sun.
+uniform sampler2D shadowAtlas;
+uniform vec3 shL;              // toward the light (the sun direction, elevation clamped)
+uniform vec3 shU;              // tile axes, perpendicular to shL
+uniform vec3 shV;
+const float SH_H = 100.0;      // tile half extent (uu) around the caster
+#ifndef SH_NTAPS
+#define SH_NTAPS 4             // soft-edge taps around the centre one (the grass uses 0: its bilinear tap is soft enough)
+#endif
+const vec2 SH_TAPS[4] = vec2[4](vec2(-0.7, -0.35), vec2(0.35, -0.7), vec2(0.7, 0.35), vec2(-0.35, 0.7));
 float shadowAt(vec3 p) {
-    vec3 L = normalize(mix(SUN_DIR, vec3(0.0, 0.0, 1.0), 0.65));
     float sh = 0.0;
     for (int i = 0; i < nCasters; i++) {
-        vec3 dc = casters[i].xyz - p;
-        float along = dot(dc, L);
-        if (along < -60.0 || along > 1800.0) continue;
-        vec3 w = p + L * along;                                          // the light ray's closest point to the caster
-        if (dot(w - casters[i].xyz, w - casters[i].xyz) > 190.0 * 190.0) continue;
-        // The ray's closest approach to the caster's SHAPE (not its centre): the distance to a convex shape is convex
-        // along a line, so a golden-section search over the stretch of the ray near the caster finds it. (One
-        // evaluation at the centre's closest point missed the ends of a tilted car -- its shadow shrank and broke.)
-        float a = max(along - 90.0, 0.0), b = max(along + 90.0, 1.0);   // only the ray ABOVE the surface
-        float x1 = b - 0.618 * (b - a), x2 = a + 0.618 * (b - a);
-        float f1 = casterSD(i, p + L * x1), f2 = casterSD(i, p + L * x2);
-        for (int k = 0; k < 6; k++) {
-            if (f1 < f2) { b = x2; x2 = x1; f2 = f1; x1 = b - 0.618 * (b - a); f1 = casterSD(i, p + L * x1); }
-            else         { a = x1; x1 = x2; f1 = f2; x2 = a + 0.618 * (b - a); f2 = casterSD(i, p + L * x2); }
+        vec3 d = p - casters[i].xyz;
+        if (dot(d.xy, d.xy) > 1800.0 * 1800.0) continue;   // cheap reject first
+        float ld = dot(d, shL);                         // < 0: below the caster, as seen from the sun
+        if (ld > 60.0 || ld < -1800.0) continue;
+        vec2 xy = vec2(dot(d, shU), dot(d, shV)) / SH_H;
+        if (abs(xy.x) > 1.0 || abs(xy.y) > 1.0) continue;
+        vec2 t0 = vec2(float(i % 3), float(i / 3)) / 3.0;
+        vec2 uv = t0 + (xy * 0.5 + 0.5) / 3.0;
+        float h = max(-ld, 0.0);
+        // penumbra: ~2 uu when touching, widening with the distance to the caster
+        float rad = (2.5 + 0.05 * h) / (6.0 * SH_H);
+        vec2 lo = t0 + 0.002, hi = t0 + 1.0 / 3.0 - 0.002;
+        vec2 s = textureLod(shadowAtlas, uv, 0.0).rg;
+        float occ = s.r * step(ld + 3.0, s.g);
+        for (int k = 0; k < SH_NTAPS; k++) {
+            s = textureLod(shadowAtlas, clamp(uv + SH_TAPS[k] * rad, lo, hi), 0.0).rg;
+            occ += s.r * step(ld + 3.0, s.g);
         }
-        // the caster's silhouette seen along the light = its outline (follows its orientation); the edge softens the
-        // higher the body is above the surface
-        float sd = min(f1, f2);
-        // (clamped: with `along` < 0 -- a surface point a little sun-ward of the caster -- the width went negative,
-        // the edge flipped, and every car threw a solid arc of shadow off to its side)
-        float soft = 3.0 + max(along, 0.0) * 0.08;
-        float strength = casters[i].w < 80.0 ? 0.80 : 0.70;
-        sh = max(sh, (1.0 - smoothstep(-soft, soft, sd)) * strength * (1.0 - smoothstep(600.0, 1800.0, along)));
+        occ /= float(SH_NTAPS + 1);
+        float strength = casters[i].w < 80.0 ? 0.78 : 0.68;
+        sh = max(sh, occ * strength * (1.0 - smoothstep(500.0, 1800.0, h)));
     }
     return sh;
 }
@@ -129,6 +123,30 @@ float markInner(vec2 d, float t, float g) {
     float gaps = clamp((min(abs(d.x), abs(d.y)) - GAP) / g + 0.5, 0.0, 1.0);
     return ring * gaps;
 }
+'''
+
+# Shadow atlas pass (main.py _render_shadow_atlas): one caster into its tile, orthographic along the light.
+SHADOW_CASTER_VERT = '''
+#version 330
+uniform mat4 m_model;
+uniform vec3 cpos;
+uniform vec3 shL;
+uniform vec3 shU;
+uniform vec3 shV;
+in vec3 in_position;
+out float v_ld;
+void main() {
+    vec3 d = (m_model * vec4(in_position, 1.0)).xyz - cpos;
+    v_ld = dot(d, shL);
+    // nearest to the light = smallest depth: the depth test keeps the caster's top surface as seen from the sun
+    gl_Position = vec4(dot(d, shU) / 100.0, dot(d, shV) / 100.0, clamp(-v_ld / 400.0, -1.0, 1.0), 1.0);
+}
+'''
+SHADOW_CASTER_FRAG = '''
+#version 330
+in float v_ld;
+out vec2 f_color;
+void main() { f_color = vec2(1.0, v_ld); }
 '''
 
 # --------------------------------------------------------------------------------------------- #
@@ -329,8 +347,8 @@ void main() {
             white = max(white, 1.0 - smoothstep(34.0, 38.0 + fwidth(r), r));
             dark = max(dark, aline(q.y, 22.0) * disc);              // thin dark split between the half discs
             // ---- per-map field style (the valley keeps the markings above as they are) ----
-            if (mapId == 1) {                        // Forbidden Temple: zones and lanes only faintly tinted
-                fill *= 0.12 + 0.88 * (1.0 - smoothstep(1000.0, 1100.0, r)); dark *= 0.5; zone *= 0.4;
+            if (mapId == 1) {                        // Forbidden Temple: full team-colour zones (were 12% -> washed out)
+                dark *= 0.5; zone *= 0.4;
             } else if (mapId == 2) {                 // Parc de Paris: striped turf, white lines, a small centre disc
                 float pw = aline(q.y, 11.0) * step(0.5, fract(q.x / 300.0 + 0.25));         // dashed halfway line
                 pw = max(pw, aline(r - 1080.0, 11.0));
@@ -397,7 +415,8 @@ void main() {
         // floor->wall curve in the colour of the team whose half it is (switches at the halfway line),
         // brighter toward its top edge, with a glowing rim like RL's arena boards
         vec3 rc = mix(vec3(0.012, 0.10, 0.78), vec3(0.82, 0.16, 0.02), smoothstep(-30.0, 30.0, p.y));
-        rc = mix(vec3(dot(rc, vec3(0.2126, 0.7152, 0.0722))), rc, 0.84);    // (0.7 before: +20% saturation)
+        // saturation: orange 0.84 (+20% over 0.7), blue 15% less than that (0.714)
+        rc = mix(vec3(dot(rc, vec3(0.2126, 0.7152, 0.0722))), rc, mix(0.714, 0.84, smoothstep(-30.0, 30.0, p.y)));
         float h = clamp(p.z / 250.0, 0.0, 1.0);
         // The mesh's curve is a few flat facets (and was striped every 55 uu): shade it as the real round fillet
         // instead -- on a quarter circle of radius R the normal's height component is 1 - z/R, its horizontal part
@@ -491,6 +510,7 @@ ARENA_FRAG_GLASS = ARENA_FRAG.replace("uniform int passMode;", "const int passMo
 # colour comes from a top-down bake of the floor shader (turf + markings), so blades on a line are line-coloured.
 GRASS_VERT = '''
 #version 330
+#define SH_NTAPS 0
 ''' + COMMON + CASTERS + '''
 uniform mat4 m_vp;
 uniform vec3 camPos;

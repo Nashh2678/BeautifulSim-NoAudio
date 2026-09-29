@@ -536,8 +536,6 @@ class RSVRenderer:
         pg["bladeH"].value = bh
         pg["casters"].write(cst.tobytes())
         pg["casterFwd"].write(cfw.tobytes())
-        pg["casterF3"].write(cf3.tobytes())
-        pg["casterU3"].write(cu3.tobytes())
         pg["nCasters"].value = n_casters
         self._turf_tex.use(location=8)
         self._pad_mask.use(location=9)
@@ -986,12 +984,14 @@ class RSVRenderer:
         self.car_vao = self.ctx.vertex_array(self.prog_car, [(self.car_vbo, "3f 3f 1f", "in_position", "in_normal", "in_mat")])
         self.car_vert_count = len(oct_inter)
         self.wheel_vaos = []
+        self._wheel_vbos = []
         for k in range(4):
             if len(oct_npz["w%d_pos" % k]) == 0:
                 continue                             # wheels baked into the body (Octane.obj fallback)
             wi = np.concatenate([oct_npz["w%d_pos" % k], oct_npz["w%d_nrm" % k], oct_npz["w%d_mat" % k][:, None]], 1).astype("f4")
             vbo = self.ctx.buffer(wi.tobytes())
             self.wheel_vaos.append(self.ctx.vertex_array(self.prog_car, [(vbo, "3f 3f 1f", "in_position", "in_normal", "in_mat")]))
+            self._wheel_vbos.append(vbo)
         self.wheel_rig = carrig.WheelRig(oct_npz["wheel_centers"], oct_npz["wheel_radius"])
         self.car_streak_points = _streak_points(oct_npz["pos"])   # flip streaks come off these model points
 
@@ -1000,6 +1000,20 @@ class RSVRenderer:
         self.ball_vbo = self.ctx.buffer((sv * 91.25).astype("f4").tobytes())
         self.ball_ibo = self.ctx.buffer(sf_.astype("i4").tobytes())
         self.ball_vao = self.ctx.vertex_array(self.prog_ball, [(self.ball_vbo, "3f", "in_position")], self.ball_ibo)
+
+        # Shadow atlas: each caster rendered from the sun into its own tile (see rl_shaders.shadowAt)
+        self.prog_shadow = self.ctx.program(vertex_shader=rl_shaders.SHADOW_CASTER_VERT,
+                                            fragment_shader=rl_shaders.SHADOW_CASTER_FRAG)
+        self._sh_car_vao = self.ctx.vertex_array(self.prog_shadow, [(self.car_vbo, "3f 16x", "in_position")])
+        self._sh_wheel_vaos = [self.ctx.vertex_array(self.prog_shadow, [(v, "3f 16x", "in_position")])
+                               for v in self._wheel_vbos]
+        self._sh_ball_vao = self.ctx.vertex_array(self.prog_shadow, [(self.ball_vbo, "3f", "in_position")], self.ball_ibo)
+        self._sh_tex = self.ctx.texture((3 * self.SH_TILE, 3 * self.SH_TILE), 2, dtype="f2")
+        self._sh_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        self._sh_tex.repeat_x = False
+        self._sh_tex.repeat_y = False
+        self._sh_fbo = self.ctx.framebuffer(color_attachments=[self._sh_tex],
+                                            depth_attachment=self.ctx.depth_renderbuffer((3 * self.SH_TILE, 3 * self.SH_TILE)))
 
         self.fx = rl_fx.FX(self.ctx)
 
@@ -2363,6 +2377,52 @@ class RSVRenderer:
 
         self.last_render_time = cur_time
 
+    SH_TILE = 160                    # shadow atlas tile size (px) -> 1.25 uu per texel over the 200 uu tile
+
+    def _shadow_basis(self):
+        """Light direction for the shadows: the sun's, with its elevation clamped (a low evening sun would otherwise
+        stretch a car's shadow across half the field) + two axes perpendicular to it."""
+        sd = np.asarray(rl_maps.THEMES[getattr(self, "map_name", "valley")]["sun_dir"], "f8")
+        h = float(np.hypot(sd[0], sd[1]))
+        if h < 1e-6:
+            L = np.array([0.0, 0.0, 1.0])
+        else:
+            L = np.array([sd[0], sd[1], max(sd[2], 0.62 * h)])
+        L /= np.linalg.norm(L)
+        U = np.cross(L, [0.0, 0.0, 1.0]) if abs(L[2]) < 0.999 else np.array([1.0, 0.0, 0.0])
+        U /= np.linalg.norm(U)
+        V = np.cross(L, U)
+        return tuple(float(x) for x in L), tuple(float(x) for x in U), tuple(float(x) for x in V)
+
+    def _render_shadow_atlas(self, casters, jobs):
+        """casters: [(x, y, z, r)] (ball first when present), jobs: per caster [(vao, model_bytes)] -> atlas tiles."""
+        L, U, V = self._shadow_basis()
+        for prog in (self.prog_shadow, self.prog_rl_arena, self.prog_grass):
+            for k, v in (("shL", L), ("shU", U), ("shV", V)):
+                if k in prog:
+                    prog[k].value = v
+        for prog in (self.prog_rl_arena, self.prog_grass):
+            if "shadowAtlas" in prog:
+                prog["shadowAtlas"].value = 11
+        fbo = self._sh_fbo
+        fbo.use()
+        fbo.clear(0.0, 1.0e4, 0.0, 0.0, depth=1.0)
+        self.ctx.disable(moderngl.BLEND)
+        self.ctx.disable(moderngl.CULL_FACE)
+        sp = self.prog_shadow
+        T = self.SH_TILE
+        for i, (c, parts) in enumerate(zip(casters, jobs)):
+            fbo.viewport = ((i % 3) * T, (i // 3) * T, T, T)
+            sp["cpos"].value = (float(c[0]), float(c[1]), float(c[2]))
+            for vao, mb in parts:
+                sp["m_model"].write(mb)
+                vao.render(moderngl.TRIANGLES)
+        fbo.viewport = (0, 0, 3 * T, 3 * T)
+        self.ctx.enable(moderngl.BLEND)
+        self.ctx.enable(moderngl.CULL_FACE)
+        self._sh_tex.use(location=11)
+        self.render_target.use()
+
     @staticmethod
     def _model_matrix(pos, forward, up, scale=1.0):
         fx_, fy, fz = float(forward[0]), float(forward[1]), float(forward[2])
@@ -2552,6 +2612,7 @@ class RSVRenderer:
 
         _c0 = time.perf_counter() if PERF else 0.0
         casters = [] if getattr(state, "ball_hidden", False) else [(ball_pos[0], ball_pos[1], ball_pos[2], 98.0)]
+        sh_jobs = [] if not casters else [[(self._sh_ball_vao, self._model_matrix(ball_pos, b_f, b_u).tobytes())]]
         caster_fwd = [(0.0, 0.0)]
         caster_f3 = [(0.0, 0.0, 0.0)]
         caster_u3 = [(0.0, 0.0, 1.0)]
@@ -2579,15 +2640,18 @@ class RSVRenderer:
             self.render_target.use()
             self.car_vao.render(moderngl.TRIANGLES)
             # wheels: suspension travel + spin + front steering (carrig.py)
-            for wv, wm in zip(self.wheel_vaos, self.wheel_rig.matrices(
-                    i, car_pos, car_forward, car_up, car_vel, bool(car_state.on_ground), delta_time)):
+            job = [(self._sh_car_vao, car_model)]
+            for k_, (wv, wm) in enumerate(zip(self.wheel_vaos, self.wheel_rig.matrices(
+                    i, car_pos, car_forward, car_up, car_vel, bool(car_state.on_ground), delta_time))):
                 self.prog_car["m_model"].write(wm)
                 wv.render(moderngl.TRIANGLES)
+                job.append((self._sh_wheel_vaos[k_], wm))
 
             if len(casters) < 9:
                 f2 = Vector3((car_forward[0], car_forward[1], 0.0))
                 f2 = f2 / max(f2.length, 1e-4)
                 casters.append((car_pos[0], car_pos[1], car_pos[2], 72.0))
+                sh_jobs.append(job)
                 caster_fwd.append((f2[0], f2[1]))
                 caster_f3.append((float(car_forward[0]), float(car_forward[1]), float(car_forward[2])))
                 caster_u3.append((float(car_up[0]), float(car_up[1]), float(car_up[2])))
@@ -2596,6 +2660,8 @@ class RSVRenderer:
                 self.fx.boost(i, tuple(car_pos), tuple(car_forward), tuple(car_up), tuple(car_vel), team, delta_time,
                               car_model)
                 self._boost_last[i] = cur_time
+            else:
+                self.fx.boost_end(i)
             # SOUND hold: bots feather boost (0.1 s presses, ~0.1 s gaps); treat presses < 0.35 s apart
             # as one boost so the Alpha ignition + tail don't retrigger twice a second ("bubbling").
             # The flame above stays exact.
@@ -2648,9 +2714,8 @@ class RSVRenderer:
         self.prog_rl_arena["casters"].write(cst.tobytes())
         if "casterFwd" in self.prog_rl_arena:          # (the arena shader may not use it)
             self.prog_rl_arena["casterFwd"].write(cfw.tobytes())
-        self.prog_rl_arena["casterF3"].write(cf3.tobytes())
-        self.prog_rl_arena["casterU3"].write(cu3.tobytes())
         self.prog_rl_arena["nCasters"].value = len(casters)
+        self._render_shadow_atlas(casters, sh_jobs)
         ball_mark = self._ball_mark(state, ball_pos)
         self.prog_rl_arena["ballMark"].value = ball_mark
         self.render_target.use()

@@ -74,7 +74,7 @@ def small(active):
         s += [_line(17.6, -0.4, 12.99, 6.2, GOLD),
               _arc(11.6, 5.4, 1.6, 30.0, 90.0, 4, GOLD),
               _line(11.6, 7.0, 0.0, 7.0, GOLD)]
-    return _lathe(s, 48)
+    return _lathe(s, 32)
 
 
 ORB_CZ, ORB_R = 29.65, 12.75
@@ -87,8 +87,8 @@ def big(active):
               _arc(14.2, 5.0, 1.8, 30.0, 90.0, 4, GOLD),
               _line(14.2, 6.8, 0.0, 6.8, GOLD)]
         # the orb: a real sphere (normals radial)
-        s += [_arc(0.0, ORB_CZ, ORB_R, -90.0, 90.0, 28, GOLD)]
-    return _lathe(s, 72)
+        s += [_arc(0.0, ORB_CZ, ORB_R, -90.0, 90.0, 18, GOLD)]
+    return _lathe(s, 48)
 
 
 def all_meshes():

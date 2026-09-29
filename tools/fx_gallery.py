@@ -241,3 +241,16 @@ def run_moving(name, speed, boosting, ages, cam_off=(-420.0, -160.0, 150.0), z=1
 run_moving("supersonic", 2300.0, False, [0.6, 1.0])
 run_moving("boostdrive", 1400.0, True, [0.6, 1.0], cam_off=(-380.0, -520.0, 170.0))
 run_moving("boostair", 900.0, True, [0.8, 1.2], cam_off=(-520.0, -600.0, 60.0), z=500.0)
+
+# car shadow close-up at chase-cam distance: on the ground, and jumping
+run("shadow2", eye=(-330.0, -60.0, 190.0), target=(0.0, 60.0, 20.0), ball=(0.0, 2500.0, 93.0),
+    cars=[car(0, (0.0, 0.0, 17.0), fwd=(0.8, 0.6, 0)), car(1, (170.0, 330.0, 140.0), fwd=(0.6, 0.8, 0))],
+    ev=None, ages=[0.05], spectate=-1)
+
+# Forbidden Temple: the team-coloured zones in front of a goal
+if not args.only or "temple_goal" in args.only.split(","):
+    _prev_map = r.map_name
+    r.set_map("temple", save=False)
+    run("temple_goal", eye=(0.0, 2600.0, 900.0), target=(0.0, 4600.0, 0.0), ball=(0.0, 0.0, 93.0), cars=[],
+        ev=None, ages=[0.05], spectate=-1)
+    r.set_map(_prev_map, save=False)
