@@ -165,7 +165,7 @@ void main() {
     // CoreColor (2.5, 1, 0.125) x Brightness (HDR) through an exposure tone curve like the game's: the thick middle
     // over-exposes to pale yellow, the thin wisps stay deep orange
     float inner = smoothstep(0.1, 0.9, body);
-    vec3 hdr = vec3(2.5, 1.0, 0.125) * v_bright * (0.25 + 1.8 * inner) * (0.8 + 0.4 * nf);
+    vec3 hdr = vec3(2.5, 1.0, 0.125) * v_bright * (0.6 + 1.5 * inner) * (0.8 + 0.4 * nf);
     vec3 col = 1.0 - exp(-hdr * 1.05);
     f_color = vec4(col * a, a * 0.8);                  // premultiplied "over", partly additive (glow)
 }
