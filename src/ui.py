@@ -70,6 +70,7 @@ class QConfigVal(QWidget):
         self.label = QtWidgets.QLabel("...")
 
         self.slider = QtWidgets.QSlider(Qt.Horizontal, self)
+        self.slider.setFocusPolicy(Qt.NoFocus)          # keys keep going to the vis
         self.slider.setFixedHeight(round(10 * get_scaling_factor()))
 
         self.float_mode = (config_val.max - config_val.min) < 10
@@ -196,6 +197,7 @@ class QEditConfigWidget(QWidget):
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         self.scroll = QtWidgets.QScrollArea()
+        self.scroll.setFocusPolicy(Qt.NoFocus)                  # arrow keys switch maps, never scroll the panel
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -361,6 +363,9 @@ class QRSVWindow(QtWidgets.QMainWindow):
 
         self.installEventFilter(self)
         self.centralWidget().installEventFilter(self)
+        # every key pressed anywhere in this window goes to the vis (arrow keys = maps, Space, ...): the settings
+        # panel's scroll area / sliders used to swallow them (the arrow keys scrolled the panel instead)
+        QtWidgets.QApplication.instance().installEventFilter(self)
 
     def moveEvent(self, e):
         if not self.isMinimized():
@@ -392,7 +397,7 @@ class QRSVWindow(QtWidgets.QMainWindow):
             self.setWindowState(self.windowState() & ~Qt.WindowMinimized)
 
     def eventFilter(self, obj, event):
-        if event.type() == QEvent.MouseButtonPress:
+        if event.type() == QEvent.MouseButtonPress and obj in (self, self.centralWidget()):
             if event.button() == Qt.LeftButton:
                 press_pos = event.pos()
 
@@ -401,7 +406,10 @@ class QRSVWindow(QtWidgets.QMainWindow):
                     if not (press_pos in self.edit_config_widget.geometry()):
                         self.toggle_edit_config()
         elif event.type() == QEvent.KeyPress:
-            self.gl_widget.keyPressEvent(event)
+            w = obj.window() if isinstance(obj, QWidget) else None
+            if w is self and not isinstance(obj, (QtWidgets.QLineEdit, QtWidgets.QAbstractSpinBox)):
+                self.gl_widget.keyPressEvent(event)
+                return True                      # handled once (it used to reach the vis twice when focused)
 
         return super().eventFilter(obj, event)
 

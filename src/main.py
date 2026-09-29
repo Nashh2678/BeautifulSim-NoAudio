@@ -715,6 +715,64 @@ class RSVRenderer:
         fbo.release(); tex2d.release()
         self._space_cube = cube
 
+    SKY_CUBE_N = 768
+    SKY_STRIPS = 4                                  # strips per face: the whole cube is re-baked every 24 frames
+
+    def _update_sky_cube(self, tnow):
+        """Map detail Low / Medium: the sky (clouds: 11 noise lookups a pixel, ~0.8 ms full screen on the iGPU) is baked
+        into a cube map, one strip of one face per frame (the clouds drift slowly enough), and the sky pass just samples
+        it. High keeps the live per-pixel sky."""
+        use = int(getattr(self.config, "q_map", 2)) < 2 and self.map_name != "space"
+        ps = self.prog_sky
+        if not use:
+            ps["skyCubeOn"].value = 0
+            return
+        from OpenGL import GL as _gl
+        N = self.SKY_CUBE_N
+        full = False
+        if self._sky_cube is None:
+            self._sky_cube = self.ctx.texture_cube((N, N), 4, dtype="f1")
+            self._sky_cube.filter = (moderngl.LINEAR, moderngl.LINEAR)
+            self._sky_tex2d = self.ctx.texture((N, N), 4, dtype="f1")
+            self._sky_fbo = self.ctx.framebuffer(color_attachments=[self._sky_tex2d])
+            full = True
+        if getattr(self, "_sky_cube_map", None) != self.map_name:
+            self._sky_cube_map = self.map_name
+            full = True
+        jobs = ([(f, s) for f in range(6) for s in range(self.SKY_STRIPS)] if full
+                else [divmod(self._sky_strip, self.SKY_STRIPS)])
+        if not full:
+            self._sky_tick = getattr(self, "_sky_tick", 0) + 1
+            if self._sky_tick % 4:                     # one strip every 4th frame: whole cube every ~0.6 s at 165 fps
+                ps["skyCubeOn"].value = 1
+                self._sky_cube.use(location=14)
+                return
+            self._sky_strip = (self._sky_strip + 1) % (6 * self.SKY_STRIPS)
+        h = N // self.SKY_STRIPS
+        vp0 = self.ctx.viewport
+        ps["bakeN"].value = float(N)
+        ps["time"].value = tnow
+        self.ctx.disable(moderngl.DEPTH_TEST)
+        self.ctx.disable(moderngl.BLEND)
+        self.ctx.disable(moderngl.CULL_FACE)
+        self._sky_fbo.use()
+        for face, strip in jobs:
+            y0 = strip * h
+            self.ctx.viewport = (0, y0, N, h)
+            ps["skyBake"].value = 10 + face
+            self.sky_vao.render(moderngl.TRIANGLES, vertices=3)
+            _gl.glActiveTexture(_gl.GL_TEXTURE15)
+            _gl.glBindTexture(_gl.GL_TEXTURE_CUBE_MAP, self._sky_cube.glo)
+            _gl.glCopyTexSubImage2D(_gl.GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, 0, y0, 0, y0, N, h)
+        _gl.glActiveTexture(_gl.GL_TEXTURE0)
+        self.ctx.viewport = vp0
+        ps["skyBake"].value = -1
+        self.ctx.enable(moderngl.CULL_FACE)
+        self.ctx.enable(moderngl.DEPTH_TEST)
+        self.ctx.enable(moderngl.BLEND)
+        self._sky_cube.use(location=14)
+        ps["skyCubeOn"].value = 1
+
     def _render_pad_ghosts(self, vp_bytes, cam_bytes):
         """The returning orbs of recharging pads. Translucent, so drawn AFTER the sky: drawn with the pads, the sky
         (which only fills pixels nothing wrote depth to) painted over them wherever the sky was behind -- they were
@@ -996,6 +1054,9 @@ class RSVRenderer:
         self.prog_sky["skyBake"].value = -1
         self.prog_sky["spaceCube"].value = 6
         self._space_cube = None
+        self.prog_sky["skyCube"].value = 14
+        self._sky_cube = None                     # Low / Medium: the sky baked into a cube map, a strip a frame
+        self._sky_strip = 0
         self._bake_blades()
         # low-poly valley around the arena (landscape.py); the built mesh is cached next to the data
         self.prog_stadium = self.ctx.program(vertex_shader=rl_shaders.LANDSCAPE_VERT, fragment_shader=rl_shaders.LANDSCAPE_FRAG)
@@ -1274,7 +1335,7 @@ class RSVRenderer:
             pos = Vector3(pos)
             forward = Vector3(forward)
             up = Vector3(up)
-            right = Vector3(pyrr.vector3.cross(forward, up))
+            right = fastvec.cross(forward, up)
 
             forward *= scale
             right *= scale
@@ -1861,9 +1922,9 @@ class RSVRenderer:
         vd = v / sp
         pos = np.asarray(tuple(car.phys.get_pos(interp_ratio)), "f8")
         self._sl_acc = min(getattr(self, "_sl_acc", 0.0) + dt * (self.SPEED_LINE_RATE + 40.0 * burst * burst), 30.0)
-        a_ = np.cross(vd, (0.0, 0.0, 1.0))
+        a_ = np.asarray(fastvec.cross(vd, (0.0, 0.0, 1.0)), "f8")
         a_ = a_ / np.linalg.norm(a_) if np.linalg.norm(a_) > 1e-3 else np.array([1.0, 0.0, 0.0])
-        b_ = np.cross(vd, a_)
+        b_ = np.asarray(fastvec.cross(vd, a_), "f8")
         alpha = 0.22 + 0.33 * burst
         while self._sl_acc >= 1.0:
             self._sl_acc -= 1.0
@@ -2086,12 +2147,27 @@ class RSVRenderer:
                 stiff = self.config.camera_stiffness.val
                 dist = self.config.camera_distance.val * (1.0 + (1.0 - stiff) * 0.30 * min(1.0, speed / 2300.0))
                 height = self.config.camera_height.val
+                # RL: the (-Distance, +Height) arm is rotated by the yaw AND the pitch toward the ball, so with the ball
+                # above the car (air dribble) the camera swings down behind it -- clamped GroundClampZOffset (10 uu)
+                # above the floor (Camera_TA default) -- and looks up: the car stays big at the bottom of the screen.
+                # (A yaw-only arm kept the camera high and tilted it up until the car left the view.)
                 to_ball = ball_pos - car_pos
-                yaw_dir = Vector3((to_ball[0], to_ball[1], 0.0))
-                if yaw_dir.length < 1.0:
-                    yaw_dir = Vector3((car_forward[0], car_forward[1], 0.0))
-                yaw_dir = safe_normalize(yaw_dir)
-                ball_cam_pos = car_pos - yaw_dir * dist + Vector3((0.0, 0.0, height))
+                hd = math.hypot(float(to_ball[0]), float(to_ball[1]))
+                if hd > 40.0:
+                    yaw_dir = Vector3((to_ball[0] / hd, to_ball[1] / hd, 0.0))
+                    self._bc_yaw = yaw_dir
+                else:                                   # ball straight overhead: keep the last heading
+                    yaw_dir = getattr(self, "_bc_yaw", None)
+                    if yaw_dir is None:
+                        yaw_dir = safe_normalize(Vector3((car_forward[0], car_forward[1], 0.0)))
+                pitch = max(0.0, min(math.radians(70.0), math.atan2(float(to_ball[2]), max(hd, 1.0))))   # only lifts: ball below = unchanged
+                pitch *= max(0.0, min(1.0, (float(car_pos[2]) - 120.0) / 200.0))    # airborne only: ground dribble view unchanged
+                cp, sp_ = math.cos(pitch), math.sin(pitch)
+                arm_f = Vector3((yaw_dir[0] * cp, yaw_dir[1] * cp, sp_))
+                arm_u = Vector3((-yaw_dir[0] * sp_, -yaw_dir[1] * sp_, cp))
+                ball_cam_pos = car_pos - arm_f * dist + arm_u * height
+                if ball_cam_pos[2] < 10.0:
+                    ball_cam_pos = Vector3((ball_cam_pos[0], ball_cam_pos[1], 10.0))
                 ball_cam_dir = self._pitch_dir(safe_normalize(ball_pos - ball_cam_pos), self.config.camera_angle.val)
 
             # Calculate car cam dir: genuinely AIRBORNE (>=200uu above the floor AND not touching any
@@ -2329,6 +2405,7 @@ class RSVRenderer:
         mp = width * height * scale * scale / 1e6
         if mp > cap:
             scale *= math.sqrt(cap / mp)
+        scale *= (0.7, 0.85, 1.0)[max(0, min(2, int(getattr(self.config, "q_res", 2))))]   # Render resolution slider
         render_w, render_h = max(1, round(width * scale)), max(1, round(height * scale))
         if self._cap_size != (render_w, render_h, samples):
             if self.cap_fbo is not None:
@@ -2590,7 +2667,7 @@ class RSVRenderer:
         # Listener for 3D sound: "right" = the world direction that appears on the RIGHT of the screen
         # (the projection mirrors x, see the negative aspect above).
         fwd_v = safe_normalize(Vector3(camera_target_pos) - Vector3(camera_pos))
-        scr_right = safe_normalize(Vector3(pyrr.vector3.cross(Vector3((0.0, 0.0, 1.0)), fwd_v)))
+        scr_right = safe_normalize(fastvec.cross((0.0, 0.0, 1.0), fwd_v))
         self.audio.set_listener(camera_pos, scr_right)
 
         spectated = self.spectate_idx if 0 <= self.spectate_idx < len(state.car_states) else -1
@@ -2771,8 +2848,7 @@ class RSVRenderer:
                         # violet streak -- hot pink-white where it leaves the wheel, deep violet -> blue as it thins
                         # out about a car length and a half behind -- with tiny bluish-white sparkles along it.
                         L_ = self.SS_TRAIL_LIFE
-                        self.fx.add_tube(rib, L_, 17.0, (0.55, 0.12, 1.0, 0.40))              # outer violet glow
-                        self.fx.add_tube(rib, L_, 5.5, (0.78, 0.32, 1.0, 1.0), white_from=0.0, white_len=28.0)
+                        self.fx.add_tube(rib, L_, 6.5, (0.78, 0.32, 1.0, 1.0), white_from=0.0, white_len=28.0)
                         self.fx.sparkle((i, k), tuple(emit), delta_time)
         self.ctx.enable(moderngl.CULL_FACE)
         self.audio.update_boost(boosting)
@@ -2805,6 +2881,7 @@ class RSVRenderer:
         self._render_shadow_atlas(casters, sh_jobs)
         ball_mark = self._ball_mark(state, ball_pos)
         self.prog_rl_arena["ballMark"].value = ball_mark
+        self._update_sky_cube(tnow)
         self.render_target.use()
         self.prog_rl_arena["detailBias"].value = 2.0 if self.config.gfx_detail == "sharp" else 1.0
         self._blade_tex.use(location=5)
@@ -2865,9 +2942,9 @@ class RSVRenderer:
         self.render_target.use()
         px_scale = height / (2.0 * math.tan(math.radians(camera_fov) / 2.0))
         cam_f = safe_normalize(Vector3(camera_target_pos) - Vector3(camera_pos))
-        cam_r = safe_normalize(Vector3(pyrr.vector3.cross(cam_f, Vector3((0.0, 0.0, 1.0)))))
+        cam_r = safe_normalize(fastvec.cross(cam_f, (0.0, 0.0, 1.0)))
         self.fx.cam_right = np.asarray(cam_r, "f4")
-        self.fx.cam_up = np.asarray(pyrr.vector3.cross(cam_r, cam_f), "f4")
+        self.fx.cam_up = np.asarray(fastvec.cross(cam_r, cam_f), "f4")
         self._update_speed_lines(state, interp_ratio, spectated)
         if self.map_name == "paris" and rl_maps.THEMES["paris"].get("night", 1.0) > 0.5:
             top = np.array([0.0, 28500.0, 25200.0], "f4")
@@ -3030,7 +3107,7 @@ class RSVRenderer:
         if len(self.ball_trail.points) > 1 and team is not None:
             self._trail_team = int(team) & 1
         if len(self.ball_trail.points) > 1:
-            self.fx.add_tube(self.ball_trail, self.BALL_TRAIL_LIFE, self.BALL_TRAIL_RADIUS,
+            self.fx.add_tube3d(self.ball_trail, self.BALL_TRAIL_LIFE, self.BALL_TRAIL_RADIUS,
                              (*[float(c) for c in self._trail_col], 0.55),
                              white_from=91.25, white_len=50.0)
 
@@ -3434,7 +3511,7 @@ class FramePacer:
     not. Every PROBE_S seconds at half rate it tries full rate again for a moment and keeps it if frames fit."""
     WINDOW = 90                  # frames per decision
     MISS = 0.08                  # > 8% of frames late = can't hold this rate
-    PROBE_S = 20.0
+    PROBE_S = 6.0                # (was 20 s: one slow patch locked the half rate for 20-60 s)
 
     def __init__(self, refresh_hz):
         self.period = 1.0 / max(30.0, float(refresh_hz))
@@ -3468,7 +3545,7 @@ class FramePacer:
             miss = self.late / float(self.n)
             if self.interval == 1 and miss > self.MISS:
                 self.interval = 2
-                self.probe_at = now + (self.PROBE_S * 3 if self.probing else self.PROBE_S)
+                self.probe_at = now + (self.PROBE_S * 2 if self.probing else self.PROBE_S)
                 print("[pacing] {:.0f}% late at {:.0f} fps -> {:.0f} fps".format(
                     100 * miss, 1 / self.period, 0.5 / self.period), flush=True)
             elif self.interval == 1 and self.probing:

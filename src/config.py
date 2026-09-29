@@ -69,12 +69,13 @@ class Config:
         "q_map": ("Map detail", ["Low", "Medium", "High"], 2),
         "gfx_grass": ("Grass", ["Off", "Low", "Medium", "High"], 2),
         "q_particles": ("Particles", ["Low", "Medium", "High"], 2),
+        "q_res": ("Render resolution", ["70%", "85%", "100%"], 2),
     }
     # Low = 165 fps on the laptop's integrated GPU (Radeon 780M), High = everything maxed
     PRESETS = {
-        "low": {"gfx_aa": 2, "q_shadow": 0, "q_crowd": 0, "q_map": 0, "gfx_grass": 0, "q_particles": 0},
-        "medium": {"gfx_aa": 4, "q_shadow": 1, "q_crowd": 1, "q_map": 1, "gfx_grass": 1, "q_particles": 1},
-        "high": {"gfx_aa": 8, "q_shadow": 2, "q_crowd": 2, "q_map": 2, "gfx_grass": 3, "q_particles": 2},
+        "low": {"gfx_aa": 2, "q_shadow": 0, "q_crowd": 0, "q_map": 0, "gfx_grass": 0, "q_particles": 0, "q_res": 0},
+        "medium": {"gfx_aa": 4, "q_shadow": 1, "q_crowd": 1, "q_map": 1, "gfx_grass": 1, "q_particles": 1, "q_res": 1},
+        "high": {"gfx_aa": 8, "q_shadow": 2, "q_crowd": 2, "q_map": 2, "gfx_grass": 3, "q_particles": 2, "q_res": 2},
     }
 
     def apply_preset(self, name):

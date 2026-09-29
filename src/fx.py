@@ -119,6 +119,9 @@ const float NO[11] = float[11](1.0, 0.975, 0.906, 0.806, 0.683, 0.55, 0.417, 0.2
 float c21(const float a[21], float t) { float x = clamp(t, 0.0, 1.0) * 20.0; int i = min(int(x), 19); return mix(a[i], a[i + 1], x - float(i)); }
 void main() {
     float t = in_t;
+    // the game's curves, with the first 35% of the life (fade + grow in) squeezed toward the start: at 1000+ uu/s the
+    // car outruns a slow fade-in, so the smoke would only appear far behind it; like this it is thick at the exhaust
+    if (t < 0.35) t = 0.35 * pow(t / 0.35, 0.3);
     float xs = clamp(t, 0.0, 1.0) * 19.0; int is = min(int(xs), 18);
     float size = in_size * mix(SZ[is], SZ[is + 1], xs - float(is));
     float xn = clamp(t, 0.0, 0.5) * 20.0; int in_ = min(int(xn), 9);
@@ -166,6 +169,40 @@ void main() {
     vec3 hdr = vec3(2.5, 1.0, 0.125) * v_bright * (0.25 + 1.8 * inner) * (0.8 + 0.4 * nf);
     vec3 col = 1.0 - exp(-hdr * 1.05);
     f_color = vec4(col * a, a * 0.93);                 // premultiplied "over", a touch additive (glow)
+}
+"""
+
+
+TUBE3D_VERT = """
+#version 330
+uniform mat4 m_vp;
+in vec3 in_pos;
+in vec3 in_nrm;
+in vec4 in_col;
+out vec3 v_p;
+out vec3 v_n;
+out vec4 v_col;
+void main() { v_p = in_pos; v_n = in_nrm; v_col = in_col; gl_Position = m_vp * vec4(in_pos, 1.0); }
+"""
+TUBE3D_FRAG = """
+#version 330
+uniform vec3 camPos;
+in vec3 v_p;
+in vec3 v_n;
+in vec4 v_col;
+out vec4 f_color;
+void main() {
+    vec3 N = normalize(v_n);
+    vec3 V = normalize(camPos - v_p);
+    float ndv = dot(N, V);
+    if (ndv <= 0.0) discard;                              // only the near half of the tube (winding-free culling)
+    vec3 L = normalize(vec3(0.35, -0.45, 0.82));
+    float dif = 0.50 + 0.55 * max(dot(N, L), 0.0);
+    float spec = pow(max(dot(reflect(-L, N), V), 0.0), 20.0) * 0.35;
+    float rim = pow(1.0 - ndv, 3.0);
+    vec3 c = v_col.rgb * dif + vec3(spec) + v_col.rgb * rim * 0.6;
+    float a = min(v_col.a * (0.45 + 0.85 * pow(ndv, 0.5)), 1.0);   // thicker through the middle: reads as a solid, round volume
+    f_color = vec4(c * a, a);
 }
 """
 
@@ -456,6 +493,11 @@ class FX:
         self.tube_vao = ctx.vertex_array(self.tube_prog, [(self.tube_vbo, "3f 4f 1f", "in_pos", "in_col", "in_u")])
         self._beams = []
         self._beam_blocks = []
+        self._tubes3d = []
+        self.tube3d_prog = ctx.program(vertex_shader=TUBE3D_VERT, fragment_shader=TUBE3D_FRAG)
+        self.TUBE3D_MAX = 32768
+        self.tube3d_vbo = ctx.buffer(reserve=self.TUBE3D_MAX * 10 * 4, dynamic=True)
+        self.tube3d_vao = ctx.vertex_array(self.tube3d_prog, [(self.tube3d_vbo, "3f 3f 4f", "in_pos", "in_nrm", "in_col")])
         self.flame_prog = ctx.program(vertex_shader=FLAME_VERT, fragment_shader=FLAME_FRAG)
         fm = _flame_mesh()
         self.flame_vao = ctx.vertex_array(self.flame_prog, [(ctx.buffer(fm.tobytes()), "2f", "in_sa")])
@@ -591,6 +633,73 @@ class FX:
                             np.asarray([getattr(p, "col", None) or base for p in pts], "f4"),   # colour per point
                             float(color[3]) if len(color) > 3 else 1.0, white_from, white_len))
 
+    def add_tube3d(self, ribbon, lifetime, radius, color, white_from=0.0, white_len=0.0):
+        """Like add_tube, but a real 3D tube mesh (a ring of vertices round every point, lit), not a camera strip."""
+        pts = [p for p in ribbon.points if p.connected]
+        if len(pts) < 2:
+            return
+        base = tuple(color[:3])
+        clk = ribbon.clock
+        self._tubes3d.append((np.array([p.pos for p in pts], "f4"), np.array([clk - p.t0 for p in pts], "f4"),
+                              np.asarray([getattr(p, "k", 1.0) for p in pts], "f4"), lifetime, radius,
+                              np.asarray([getattr(p, "col", None) or base for p in pts], "f4"),
+                              float(color[3]) if len(color) > 3 else 1.0, white_from, white_len))
+
+    TUBE3D_SIDES = 10
+
+    def _render_tubes3d(self, m_vp_bytes, cam):
+        if not self._tubes3d:
+            return
+        T = self._tubes3d
+        self._tubes3d = []
+        S = self.TUBE3D_SIDES
+        ang = np.arange(S + 1, dtype="f4") * (2.0 * math.pi / S)
+        ca, sa = np.cos(ang), np.sin(ang)
+        out = []
+        for pos, age, kpt, life, radius, rgb, a0, w_from, w_len in T:
+            n = len(pos)
+            seg = np.empty_like(pos)
+            seg[:-1] = pos[1:] - pos[:-1]
+            seg[-1] = seg[-2]
+            sl = np.sqrt((seg * seg).sum(1))
+            tan = seg / (sl[:, None] + 1e-6)
+            # parallel-transported frame (no twisting where the path turns or goes vertical)
+            t0 = tan[0]
+            ref = (0.0, 0.0, 1.0) if abs(float(t0[2])) < 0.9 else (1.0, 0.0, 0.0)
+            nx = np.empty((n, 3), "f4")
+            v = np.cross(t0, ref); v /= (np.linalg.norm(v) + 1e-9)
+            tl = tan.tolist()
+            vx, vy, vz = (float(c) for c in v)
+            for i in range(n):
+                tx, ty, tz = tl[i]
+                d = vx * tx + vy * ty + vz * tz
+                vx -= d * tx; vy -= d * ty; vz -= d * tz
+                inv = 1.0 / (math.sqrt(vx * vx + vy * vy + vz * vz) + 1e-9)
+                vx *= inv; vy *= inv; vz *= inv
+                nx[i] = (vx, vy, vz)
+            bx = np.cross(tan, nx)
+            nrm = nx[:, None, :] * ca[None, :, None] + bx[:, None, :] * sa[None, :, None]      # (n, S+1, 3)
+            t = np.clip(age / life, 0.0, 1.0)
+            dist = np.concatenate([[0.0], np.cumsum(sl[:-1])]).astype("f4")
+            w = 1.0 - np.clip((dist - w_from) / max(w_len, 1e-3), 0.0, 1.0) if w_len > 0 else np.zeros(n, "f4")
+            rad = radius * (1.0 - 0.35 * t)
+            V = np.empty((n, S + 1, 10), "f4")
+            V[:, :, 0:3] = pos[:, None, :] + nrm * rad[:, None, None]
+            V[:, :, 3:6] = nrm
+            V[:, :, 6:9] = (rgb * (1.0 - w[:, None]) + w[:, None])[:, None, :]
+            V[:, :, 9] = (a0 * (1.0 - t) * kpt)[:, None]
+            a, b, c, d = V[:-1, :-1], V[:-1, 1:], V[1:, :-1], V[1:, 1:]
+            out.append(np.stack([a, b, c, b, d, c], 2).reshape(-1, 10))
+        data = np.concatenate(out, 0)[:self.TUBE3D_MAX]
+        self.tube3d_vbo.write(data.tobytes())
+        p = self.tube3d_prog
+        p["m_vp"].write(m_vp_bytes)
+        p["camPos"].value = tuple(float(c) for c in cam)
+        self.ctx.blend_func = moderngl.ONE, moderngl.ONE_MINUS_SRC_ALPHA
+        self.ctx.disable(moderngl.CULL_FACE)
+        self.tube3d_vao.render(moderngl.TRIANGLES, vertices=len(data))
+        self.ctx.enable(moderngl.CULL_FACE)
+
     def _render_tubes(self, m_vp_bytes, cam):
         """All queued tubes in ONE vectorised build (no per-tube numpy calls) -> one triangle-list draw."""
         if not self._tubes:
@@ -699,39 +808,9 @@ class FX:
         cv = np.asarray(car_vel, "f4")
         rng = self._rng
         fl = float(rng.uniform(0.9, 1.1))
-        # the game's boost mesh: two glowing flame cones out of the exhaust (drawn in _render_flames)
-        if model_bytes is not None:
-            self._flames.append((model_bytes, (1.0, 0.86, 0.45), (1.0, 0.52, 0.10)))
-        # HotSourceSize 8 / GlowSize 45: a white-hot core and a gold glow on the exhaust; the lens flare (inner cone
-        # 40 deg, outer 170 deg around the exhaust's axis) -> a big soft glow that is strongest seen from behind
-        facing = 0.0
-        cam = getattr(self, "cam_pos", None)
-        if cam is not None:
-            dc = np.asarray(cam, "f4") - base
-            ld = float(np.linalg.norm(dc))
-            if ld > 1.0:
-                cosang = float(np.dot(-fwd, dc)) / ld
-                ang = math.degrees(math.acos(max(-1.0, min(1.0, cosang))))
-                facing = 1.0 - min(1.0, max(0.0, (ang - 20.0) / 65.0))
-        self.add.spawn(base[None, :], cv[None, :], np.array([0.02], "f4"), np.array([90.0 * fl], "f4"), 80.0,
-                       np.array([1.0, 0.55, 0.10, 0.40 + 0.25 * facing], "f4"), np.array([1.0, 0.4, 0.05, 0.0], "f4"))
-        self.add.spawn(base[None, :], cv[None, :], np.array([0.02], "f4"), np.array([18.0 * fl], "f4"), 16.0,
-                       np.array([1.0, 0.95, 0.75, 1.0], "f4"), np.array([1.0, 0.8, 0.4, 0.0], "f4"))
-        if facing > 0.0:
-            self.add.spawn(base[None, :], cv[None, :], np.array([0.02], "f4"), np.array([230.0], "f4"), 220.0,
-                           np.array([1.0, 0.62, 0.18, 0.22 * facing], "f4"), np.array([1.0, 0.5, 0.1, 0.0], "f4"))
-        self.nozzle_flares.append((base.copy(), fl))
+        # (no glow sprite / lens flare / flame cones at the exhaust: the Alpha Boost is just its smoke + sparkles)
         right = np.array([fwd[1] * up[2] - fwd[2] * up[1], fwd[2] * up[0] - fwd[0] * up[2],
                           fwd[0] * up[1] - fwd[1] * up[0]], "f4")
-        # Drive_PS: ~10 small glowing sprites/s blown back at 50..100 uu/s, growing x4 and fading over 0.5 s
-        acc = self._boost_accum.get(("drv", key), 0.0) + 10.0 * dt
-        kd = int(acc); self._boost_accum[("drv", key)] = acc - kd
-        if kd > 0:
-            kd = min(kd, 3)
-            s0 = rng.uniform(6.5, 12.5, kd).astype("f4") * 2.0
-            v = cv[None, :] - fwd[None, :] * rng.uniform(50.0, 100.0, (kd, 1)).astype("f4") + rng.normal(0, 5.0, (kd, 3)).astype("f4")
-            self.add.spawn(np.repeat(base[None, :], kd, 0), v, np.full(kd, 0.5, "f4"), s0, float(s0.mean() * 4.0),
-                           np.array([1.0, 0.8, 0.1, 0.5], "f4"), np.array([1.0, 0.4, 0.05, 0.0], "f4"))
         # SpawnPerUnit (UnitScalar 32 uu) x the boost actor's SpawnRate, a random 0..4 drawn per 32 uu step: on average
         # 2 puffs per 32 uu, but bunched -- some steps drop none, others three -> the clumps and gaps of the game
         prev = self._boost_last_base.get(key)
@@ -761,13 +840,13 @@ class FX:
             pts = np.concatenate(pts, 0)
             self._add_puffs(pts)
             # embers: tiny bright sparks sprinkled through the flame, drifting out and up, twinkling out
-            ke = min(len(pts) * 2, 40)
+            ke = min(len(pts) * 3, 60)
             if ke:
-                src = pts[rng.integers(0, len(pts), ke)] + rng.normal(0.0, 9.0, (ke, 3)).astype("f4")
+                src = pts[rng.integers(0, len(pts), ke)] + rng.normal(0.0, 12.0, (ke, 3)).astype("f4")
                 d = self._rand_dirs(ke)
-                self.add.spawn(src, d * rng.uniform(15.0, 70.0, (ke, 1)).astype("f4") + np.array([0, 0, 25.0], "f4"),
-                               rng.uniform(0.3, 0.9, ke).astype("f4"), rng.uniform(2.2, 4.0, ke).astype("f4"), 1.0,
-                               np.array([1.0, 0.95, 0.65, 1.0], "f4"), np.array([1.0, 0.55, 0.1, 0.0], "f4"), drag=1.5)
+                self.add.spawn(src, d * rng.uniform(15.0, 80.0, (ke, 1)).astype("f4") + np.array([0, 0, 25.0], "f4"),
+                               rng.uniform(0.25, 0.8, ke).astype("f4"), rng.uniform(2.0, 3.8, ke).astype("f4"), 1.0,
+                               np.array([1.0, 0.97, 0.75, 1.0], "f4"), np.array([1.0, 0.6, 0.15, 0.0], "f4"), drag=1.5)
 
     def boost_end(self, key):
         """The car stopped boosting: the next boost starts a new puff trail right at the nozzle."""
@@ -1014,6 +1093,30 @@ class FX:
         # shock spheres (drawn in _render_shells) + the ground ring
         self.shells.append([pos.copy(), -0.0, 0.75 / v, 80.0, 1500.0, col.copy(), 1.0])
         self.shells.append([pos.copy(), -0.10 / v, 0.85 / v, 60.0, 1150.0, col.copy(), 0.7])
+        # the plasma cloud: big soft glowing billows in the team colour thrown out of the core, braking hard and
+        # swelling, so the burst has a body that lingers and slowly fades after the shock has passed
+        nb = 70
+        d = self._rand_dirs(nb)
+        d[:, 1] -= 1.1 * np.sign(pos[1])                      # out of the goal mouth, into the field
+        d[:, 2] = np.abs(d[:, 2]) * 0.8 + 0.25
+        d /= np.linalg.norm(d, axis=1, keepdims=True)
+        self.add.spawn(np.repeat(pos[None, :], nb, 0) + d * 60.0, d * rng.uniform(900 * v, 2400 * v, (nb, 1)),
+                       rng.uniform(1.2 / v, 2.0 / v, nb), rng.uniform(220, 380, nb), rng.uniform(650, 950, nb),
+                       np.array([*(0.25 * hot + 0.75 * col), 0.20], "f4"), np.array([*col, 0.0], "f4"), drag=1.7 * v)
+        # a second, hotter, inner billow layer (white-hot heart of the cloud)
+        ni = 24
+        d = self._rand_dirs(ni)
+        self.add.spawn(np.repeat(pos[None, :], ni, 0), d * rng.uniform(150 * v, 500 * v, (ni, 1)),
+                       rng.uniform(0.5 / v, 0.9 / v, ni), rng.uniform(120, 200, ni), rng.uniform(300, 420, ni),
+                       np.array([*hot, 0.35], "f4"), np.array([*col, 0.0], "f4"), drag=3.0 * v)
+        # glittering embers left hanging in the cloud, drifting down and twinkling out after the burst
+        ne = 140
+        d = self._rand_dirs(ne)
+        d[:, 1] -= 0.9 * np.sign(pos[1])
+        d /= np.linalg.norm(d, axis=1, keepdims=True)
+        self.add.spawn(np.repeat(pos[None, :], ne, 0) + d * 50.0, d * rng.uniform(700 * v, 1700 * v, (ne, 1)),
+                       rng.uniform(1.3 / v, 2.3 / v, ne), rng.uniform(16, 26, ne), 5.0,
+                       np.array([*hot, 1.0], "f4"), np.array([*col, 0.0], "f4"), drag=2.0 * v, grav=-120.0 * v * v)
         gp = pos.copy(); gp[2] = 4.0
         self.ring(gp, (0, 0, 1), 80.0, 1700.0, 0.8 / v, 0.05, (*col, 0.9), core=tuple(hot))
         # light rays out of the core
@@ -1221,6 +1324,7 @@ class FX:
         self._nozzle_flare_beams()
         self._render_trails(m_vp_bytes, cam_pos)
         self._render_tubes(m_vp_bytes, cam_pos)
+        self._render_tubes3d(m_vp_bytes, cam_pos)
         self._render_flames(m_vp_bytes, cam_pos)
         self._render_domes(m_vp_bytes, cam_pos)
         self._render_shells(m_vp_bytes, cam_pos)

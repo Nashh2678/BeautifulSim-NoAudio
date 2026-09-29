@@ -31,6 +31,11 @@ import state_manager
 W, H = (int(x) for x in args.size.split("x"))
 ctx = moderngl.create_standalone_context(require=330)
 r = rsv.RSVRenderer()
+for kv in filter(None, os.environ.get("RSV_CFG", "").split(",")):     # config overrides: k=v,k=v
+    k_, v_ = kv.split("=")
+    try: v_ = int(v_)
+    except ValueError: pass
+    setattr(r.config, k_, v_)
 r.audio.wait_loaded()
 r.init_gl(ctx)
 screen = ctx.framebuffer(color_attachments=[ctx.texture((W, H), 4)], depth_attachment=ctx.depth_renderbuffer((W, H)))
@@ -262,3 +267,46 @@ run_moving("boostpov_slow", 500.0, True, [0.5, 0.9], pov=True)
 # grass close-up (compare grass modes)
 run("grass", eye=(-600.0, -900.0, 160.0), target=(-200.0, -300.0, 0.0), ball=(0.0, 2500.0, 93.0),
     cars=[car(0, (-150.0, -250.0, 17.0))], ev=None, ages=[0.05], spectate=-1)
+
+# ball cam with the ball on top of the car (ground dribble, air dribble): the real spectate camera
+run("dribble_cam", eye=None, target=None, ball=(0.0, 20.0, 160.0), cars=[car(0, (0.0, 0.0, 17.0))], ev=None,
+    ages=[0.3], spectate=0)
+run("airdribble_cam", eye=None, target=None, ball=(0.0, 90.0, 760.0),
+    cars=[car(0, (0.0, 0.0, 600.0), fwd=(0, 0.5, 0.866), up=(0, -0.866, 0.5))], ev=None, ages=[0.3], spectate=0)
+
+
+def run_ball(name, ages, eye, target):
+    """The ball flying a curved path at ~2600 uu/s (live-fed), fixed camera: the ball trail."""
+    if args.only and name not in args.only.split(","):
+        return
+    t0 = time.time()
+    r.spectate_idx = -1
+    import events as rl_events
+    rl_events.g_detector.last_touch_team = 1
+    shots = []
+    todo = list(ages)
+    while todo:
+        tt = time.time() - t0
+        a = tt * 1.6; tt_ = tt; tt = tt * 1.5
+        bp = [1200.0 * math.sin(a), -1500.0 + 1800.0 * tt, 300.0 + 350.0 * math.sin(a * 1.3)]
+        bv = [2880.0 * math.cos(a), 2700.0, 885.0 * math.cos(a * 1.3)]; tt = tt_
+        j = {"gamemode": "soccar", "ball_phys": {"pos": bp, "vel": bv, "ang_vel": [0, 0, 0]},
+             "cars": [car(0, (0.0, -2500.0, 17.0))], "boost_pad_states": [True] * 34}
+        with state_manager.global_state_mutex:
+            st = state_manager.global_state_manager.state
+            st.read_from_json(j); st.read_from_json(j)
+            st.recv_time = time.time(); st.recv_interval = 1 / 120
+        state_manager.pose_cam = ((bp[0] + eye[0], bp[1] + eye[1], bp[2] + eye[2]), tuple(bp[k] - 0.5 * bv[k] * 0.25 for k in range(3)))
+        rl_events.g_detector.last_touch_team = 1
+        im = frame()
+        if tt >= todo[0]:
+            shots.append(im); todo.pop(0)
+    sheet = Image.new("RGB", (W * 2, H * ((len(shots) + 1) // 2)))
+    for i, im in enumerate(shots):
+        sheet.paste(im, ((i % 2) * W, (i // 2) * H))
+    sheet.save(os.path.join(args.out, name + ".png"))
+    print("saved", name)
+
+
+import math
+run_ball("balltrail", [0.9, 1.3], eye=(-900.0, -300.0, 250.0), target=None)

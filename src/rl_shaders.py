@@ -877,6 +877,8 @@ uniform vec2 cloudShape;   // cloud noise scale along x / y (equal = puffy, very
 uniform samplerCube spaceCube;   // the baked static space sky (spaceStatic) + open-sky mask in alpha
 uniform int skyBake;       // >= 0: bake face skyBake (0..5 = +X -X +Y -Y +Z -Z) of spaceStatic; -1 = normal
 uniform float bakeN;       // cube face size in texels
+uniform samplerCube skyCube;     // the normal maps' sky, baked a strip at a time (skyBake 10..15): cheap sky for Low/Medium
+uniform int skyCubeOn;
 in vec2 v_ndc;
 out vec4 f_color;
 
@@ -1066,11 +1068,13 @@ vec3 spaceSky(vec3 d) {
     return c + st * bk.a;
 }
 
+vec3 skyMain(vec3 d, out float cover);
+
 void main() {
     vec4 a = invVP * vec4(v_ndc, -1.0, 1.0);
     vec4 b = invVP * vec4(v_ndc, 1.0, 1.0);
     vec3 d = normalize(b.xyz / b.w - a.xyz / a.w);
-    if (skyBake >= 0) {
+    if (skyBake >= 0 && skyBake < 10) {
         vec2 st_ = gl_FragCoord.xy / bakeN * 2.0 - 1.0;          // GL cube map face conventions
         vec3 fd = skyBake == 0 ? vec3(1.0, -st_.y, -st_.x) : skyBake == 1 ? vec3(-1.0, -st_.y, st_.x)
                 : skyBake == 2 ? vec3(st_.x, 1.0, st_.y) : skyBake == 3 ? vec3(st_.x, -1.0, -st_.y)
@@ -1084,8 +1088,34 @@ void main() {
         f_color = vec4(to_srgb(spaceSky(d)), 1.0);
         return;
     }
+    vec3 c;
+    float cover;
+    if (skyBake >= 10) {
+        vec2 st_ = gl_FragCoord.xy / bakeN * 2.0 - 1.0;
+        int fb = skyBake - 10;
+        vec3 fd = fb == 0 ? vec3(1.0, -st_.y, -st_.x) : fb == 1 ? vec3(-1.0, -st_.y, st_.x)
+                : fb == 2 ? vec3(st_.x, 1.0, st_.y) : fb == 3 ? vec3(st_.x, -1.0, -st_.y)
+                : fb == 4 ? vec3(st_.x, -st_.y, 1.0) : vec3(-st_.x, -st_.y, -1.0);
+        c = skyMain(normalize(fd), cover);
+        f_color = vec4(to_srgb(c), cover);
+        return;
+    }
+    if (skyCubeOn == 1) {
+        vec4 bk = texture(skyCube, d);
+        vec3 y = pow(bk.rgb, vec3(2.2));
+        c = y / max(1.0 - 0.15 * y, 0.05);                    // undo to_srgb
+        cover = bk.a;
+    } else
+        c = skyMain(d, cover);
+    // the first stars in the dark part of the dusk sky
+    float sm = starK * smoothstep(0.2, 0.75, d.z) * (1.0 - cover);
+    if (sm > 0.0) c += stars(d, 80.0, 0.02, 3.0) * sm;
+    f_color = vec4(to_srgb(c), 1.0);
+}
+
+vec3 skyMain(vec3 d, out float cover) {
     vec3 c = sky_color(d);
-    float cover = 0.0;
+    cover = 0.0;
     if (d.z > 0.01) {
         // clouds: a warped fbm on a plane above the arena; lit from the sun side (a brighter rim toward the
         // sun, darker bellies), a thin high layer of wisps on top
@@ -1125,10 +1155,7 @@ void main() {
             c = mix(c, vec3(0.95, 0.94, 0.98) * ph * (0.8 + 0.25 * mar), mm.a * (1.0 - cover * 0.6));
         }
     }
-    // the first stars in the dark part of the dusk sky
-    float sm = starK * smoothstep(0.2, 0.75, d.z) * (1.0 - cover);
-    if (sm > 0.0) c += stars(d, 80.0, 0.02, 3.0) * sm;
-    f_color = vec4(to_srgb(c), 1.0);
+    return c;
 }
 '''
 
@@ -1145,7 +1172,7 @@ out float v_seed;           // >= 0: flame puff (noisy, ragged edge) with this s
 void main() {
     vec4 cp = m_vp * vec4(in_pos, 1.0);
     gl_Position = cp;
-    gl_PointSize = clamp(abs(in_size) * pxScale / max(cp.w, 1.0), 1.0, 512.0);
+    gl_PointSize = clamp(abs(in_size) * pxScale / max(cp.w, 1.0), 1.0, 1024.0);
     v_col = in_col;
     v_seed = in_size < 0.0 ? fract(sin(dot(in_pos.xy, vec2(12.9898, 78.233)) + in_pos.z) * 43758.5453) * 97.0 : -1.0;
 }
