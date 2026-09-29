@@ -13,13 +13,14 @@ files into `data/sounds/` and they play (see [Sound](#sound)).
 
 <p align="center"><img src="docs/paris.jpg" alt="Parc de Paris: a shot on goal, the opponent boosting in" width="100%"></p>
 <p align="center">
+  <img src="docs/flipreset.jpg" alt="Forbidden Temple: a flip reset on the ball" width="49%">
+  <img src="docs/demo.jpg" alt="Evening Valley: a demolition" width="49%">
   <img src="docs/valley.jpg" alt="Evening Valley: a dribble" width="49%">
   <img src="docs/temple.jpg" alt="Forbidden Temple: an aerial touch" width="49%">
   <img src="docs/orbit.jpg" alt="Orbit: an aerial touch under the ringed planet" width="49%">
   <img src="docs/goal.jpg" alt="Parc de Paris: goal explosion" width="49%">
 </p>
-<p align="center"><sub>A real bot game (1v1), one map per shot: Parc de Paris, Evening Valley, Forbidden Temple and
-Orbit. High preset, 1920x1080, rendered with <code>tools/readme_shots.py</code>.</sub></p>
+<p align="center"><sub>Real bot games on all four maps, High preset, 1920x1080.</sub></p>
 
 ## Installation (Windows)
 
