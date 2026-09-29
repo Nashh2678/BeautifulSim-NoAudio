@@ -715,13 +715,14 @@ class RSVRenderer:
         fbo.release(); tex2d.release()
         self._space_cube = cube
 
-    SKY_CUBE_N = 768
-    SKY_STRIPS = 4                                  # strips per face: the whole cube is re-baked every 24 frames
+    SKY_CUBE_N = 1024
+    SKY_STRIPS = 4                                  # strips per face
 
     def _update_sky_cube(self, tnow):
         """Map detail Low / Medium: the sky (clouds: 11 noise lookups a pixel, ~0.8 ms full screen on the iGPU) is baked
-        into a cube map, one strip of one face per frame (the clouds drift slowly enough), and the sky pass just samples
-        it. High keeps the live per-pixel sky."""
+        into a cube map and the sky pass just samples it. Double-buffered: the back cube is baked a strip every 2nd frame,
+        every strip with the SAME time, and only swapped in once complete -- strips baked at different times did not
+        line up (the clouds drift), which made the sky patchy. High keeps the live per-pixel sky."""
         use = int(getattr(self.config, "q_map", 2)) < 2 and self.map_name != "space"
         ps = self.prog_sky
         if not use:
@@ -729,47 +730,60 @@ class RSVRenderer:
             return
         from OpenGL import GL as _gl
         N = self.SKY_CUBE_N
-        full = False
+        S = self.SKY_STRIPS
         if self._sky_cube is None:
-            self._sky_cube = self.ctx.texture_cube((N, N), 4, dtype="f1")
-            self._sky_cube.filter = (moderngl.LINEAR, moderngl.LINEAR)
+            self._sky_cubes = []
+            for _ in range(2):
+                cb = self.ctx.texture_cube((N, N), 4, dtype="f1")
+                cb.filter = (moderngl.LINEAR, moderngl.LINEAR)
+                self._sky_cubes.append(cb)
+            self._sky_cube = self._sky_cubes[0]
             self._sky_tex2d = self.ctx.texture((N, N), 4, dtype="f1")
             self._sky_fbo = self.ctx.framebuffer(color_attachments=[self._sky_tex2d])
-            full = True
-        if getattr(self, "_sky_cube_map", None) != self.map_name:
+            try:
+                self.ctx.enable_direct(0x884F)              # GL_TEXTURE_CUBE_MAP_SEAMLESS: no seams at the face edges
+            except Exception:
+                pass
+        jobs = None
+        if getattr(self, "_sky_cube_map", None) != self.map_name:     # new map: bake everything now, both cubes
             self._sky_cube_map = self.map_name
-            full = True
-        jobs = ([(f, s) for f in range(6) for s in range(self.SKY_STRIPS)] if full
-                else [divmod(self._sky_strip, self.SKY_STRIPS)])
-        if not full:
+            self._sky_strip, self._sky_bake_t = 0, tnow
+            jobs = [(cb, f, k) for cb in self._sky_cubes for f in range(6) for k in range(S)]
+        else:
             self._sky_tick = getattr(self, "_sky_tick", 0) + 1
-            if self._sky_tick % 4:                     # one strip every 4th frame: whole cube every ~0.6 s at 165 fps
-                ps["skyCubeOn"].value = 1
-                self._sky_cube.use(location=14)
-                return
-            self._sky_strip = (self._sky_strip + 1) % (6 * self.SKY_STRIPS)
-        h = N // self.SKY_STRIPS
-        vp0 = self.ctx.viewport
-        ps["bakeN"].value = float(N)
-        ps["time"].value = tnow
-        self.ctx.disable(moderngl.DEPTH_TEST)
-        self.ctx.disable(moderngl.BLEND)
-        self.ctx.disable(moderngl.CULL_FACE)
-        self._sky_fbo.use()
-        for face, strip in jobs:
-            y0 = strip * h
-            self.ctx.viewport = (0, y0, N, h)
-            ps["skyBake"].value = 10 + face
-            self.sky_vao.render(moderngl.TRIANGLES, vertices=3)
+            if self._sky_tick % 2 == 0:
+                if self._sky_strip == 0:
+                    self._sky_bake_t = tnow
+                back = self._sky_cubes[1] if self._sky_cube is self._sky_cubes[0] else self._sky_cubes[0]
+                f, k = divmod(self._sky_strip, S)
+                jobs = [(back, f, k)]
+                self._sky_strip += 1
+        if jobs:
+            h = N // S
+            vp0 = self.ctx.viewport
+            ps["bakeN"].value = float(N)
+            ps["time"].value = self._sky_bake_t
+            self.ctx.disable(moderngl.DEPTH_TEST)
+            self.ctx.disable(moderngl.BLEND)
+            self.ctx.disable(moderngl.CULL_FACE)
+            self._sky_fbo.use()
             _gl.glActiveTexture(_gl.GL_TEXTURE15)
-            _gl.glBindTexture(_gl.GL_TEXTURE_CUBE_MAP, self._sky_cube.glo)
-            _gl.glCopyTexSubImage2D(_gl.GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, 0, y0, 0, y0, N, h)
-        _gl.glActiveTexture(_gl.GL_TEXTURE0)
-        self.ctx.viewport = vp0
-        ps["skyBake"].value = -1
-        self.ctx.enable(moderngl.CULL_FACE)
-        self.ctx.enable(moderngl.DEPTH_TEST)
-        self.ctx.enable(moderngl.BLEND)
+            for cb, face, k in jobs:
+                y0 = k * h
+                self.ctx.viewport = (0, y0, N, h)
+                ps["skyBake"].value = 10 + face
+                self.sky_vao.render(moderngl.TRIANGLES, vertices=3)
+                _gl.glBindTexture(_gl.GL_TEXTURE_CUBE_MAP, cb.glo)
+                _gl.glCopyTexSubImage2D(_gl.GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, 0, y0, 0, y0, N, h)
+            _gl.glActiveTexture(_gl.GL_TEXTURE0)
+            self.ctx.viewport = vp0
+            ps["skyBake"].value = -1
+            self.ctx.enable(moderngl.CULL_FACE)
+            self.ctx.enable(moderngl.DEPTH_TEST)
+            self.ctx.enable(moderngl.BLEND)
+            if self._sky_strip >= 6 * S:                    # back cube complete: show it
+                self._sky_cube = jobs[-1][0]
+                self._sky_strip = 0
         self._sky_cube.use(location=14)
         ps["skyCubeOn"].value = 1
 
@@ -2147,27 +2161,12 @@ class RSVRenderer:
                 stiff = self.config.camera_stiffness.val
                 dist = self.config.camera_distance.val * (1.0 + (1.0 - stiff) * 0.30 * min(1.0, speed / 2300.0))
                 height = self.config.camera_height.val
-                # RL: the (-Distance, +Height) arm is rotated by the yaw AND the pitch toward the ball, so with the ball
-                # above the car (air dribble) the camera swings down behind it -- clamped GroundClampZOffset (10 uu)
-                # above the floor (Camera_TA default) -- and looks up: the car stays big at the bottom of the screen.
-                # (A yaw-only arm kept the camera high and tilted it up until the car left the view.)
                 to_ball = ball_pos - car_pos
-                hd = math.hypot(float(to_ball[0]), float(to_ball[1]))
-                if hd > 40.0:
-                    yaw_dir = Vector3((to_ball[0] / hd, to_ball[1] / hd, 0.0))
-                    self._bc_yaw = yaw_dir
-                else:                                   # ball straight overhead: keep the last heading
-                    yaw_dir = getattr(self, "_bc_yaw", None)
-                    if yaw_dir is None:
-                        yaw_dir = safe_normalize(Vector3((car_forward[0], car_forward[1], 0.0)))
-                pitch = max(0.0, min(math.radians(70.0), math.atan2(float(to_ball[2]), max(hd, 1.0))))   # only lifts: ball below = unchanged
-                pitch *= max(0.0, min(1.0, (float(car_pos[2]) - 120.0) / 200.0))    # airborne only: ground dribble view unchanged
-                cp, sp_ = math.cos(pitch), math.sin(pitch)
-                arm_f = Vector3((yaw_dir[0] * cp, yaw_dir[1] * cp, sp_))
-                arm_u = Vector3((-yaw_dir[0] * sp_, -yaw_dir[1] * sp_, cp))
-                ball_cam_pos = car_pos - arm_f * dist + arm_u * height
-                if ball_cam_pos[2] < 10.0:
-                    ball_cam_pos = Vector3((ball_cam_pos[0], ball_cam_pos[1], 10.0))
+                yaw_dir = Vector3((to_ball[0], to_ball[1], 0.0))
+                if yaw_dir.length < 1.0:
+                    yaw_dir = Vector3((car_forward[0], car_forward[1], 0.0))
+                yaw_dir = safe_normalize(yaw_dir)
+                ball_cam_pos = car_pos - yaw_dir * dist + Vector3((0.0, 0.0, height))
                 ball_cam_dir = self._pitch_dir(safe_normalize(ball_pos - ball_cam_pos), self.config.camera_angle.val)
 
             # Calculate car cam dir: genuinely AIRBORNE (>=200uu above the floor AND not touching any

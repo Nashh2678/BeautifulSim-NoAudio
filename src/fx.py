@@ -119,9 +119,9 @@ const float NO[11] = float[11](1.0, 0.975, 0.906, 0.806, 0.683, 0.55, 0.417, 0.2
 float c21(const float a[21], float t) { float x = clamp(t, 0.0, 1.0) * 20.0; int i = min(int(x), 19); return mix(a[i], a[i + 1], x - float(i)); }
 void main() {
     float t = in_t;
-    // the game's curves, with the first 35% of the life (fade + grow in) squeezed toward the start: at 1000+ uu/s the
-    // car outruns a slow fade-in, so the smoke would only appear far behind it; like this it is thick at the exhaust
-    if (t < 0.35) t = 0.35 * pow(t / 0.35, 0.3);
+    // the game's curves, with the first 35% of the life (fade + grow in) a bit faster: the streams show up about half
+    // a car length behind the exhaust and grow from there (with the raw curve they only appeared far behind the car)
+    if (t < 0.35) t = 0.35 * pow(t / 0.35, 0.75);
     float xs = clamp(t, 0.0, 1.0) * 19.0; int is = min(int(xs), 18);
     float size = in_size * mix(SZ[is], SZ[is + 1], xs - float(is));
     float xn = clamp(t, 0.0, 0.5) * 20.0; int in_ = min(int(xn), 9);
@@ -196,12 +196,11 @@ void main() {
     vec3 V = normalize(camPos - v_p);
     float ndv = dot(N, V);
     if (ndv <= 0.0) discard;                              // only the near half of the tube (winding-free culling)
-    vec3 L = normalize(vec3(0.35, -0.45, 0.82));
-    float dif = 0.50 + 0.55 * max(dot(N, L), 0.0);
-    float spec = pow(max(dot(reflect(-L, N), V), 0.0), 20.0) * 0.35;
-    float rim = pow(1.0 - ndv, 3.0);
-    vec3 c = v_col.rgb * dif + vec3(spec) + v_col.rgb * rim * 0.6;
-    float a = min(v_col.a * (0.45 + 0.85 * pow(ndv, 0.5)), 1.0);   // thicker through the middle: reads as a solid, round volume
+    // exactly the old camera-facing strip's look (s = 1 on the axis, 0 at the rim), with ndv as the cross-section:
+    // the same colour ramp, highlight and soft edge, but on a real round tube that follows the ball in 3D
+    float s = ndv;
+    vec3 c = v_col.rgb * (0.45 + 0.65 * s) + vec3(1.0) * pow(s, 6.0) * 0.28;
+    float a = v_col.a * pow(s, 1.6);
     f_color = vec4(c * a, a);
 }
 """
@@ -766,7 +765,7 @@ class FX:
     NOZZLE = (-57.0, 0.0, 10.0)     # Octane exhaust, car space
     ALPHA_HOT = (1.0, 0.90, 0.55)    # Alpha Boost: golden-yellow streams, white-hot orange glow at the nozzle. One look for
     ALPHA_FLAME = (1.0, 0.62, 0.08)  # both teams.
-    STREAM_OFFSET = 10.0             # the two streams leave the exhaust this far to each side
+    STREAM_OFFSET = 24.0             # the two streams leave the exhaust this far to each side
     PUFF_SPACING = 32.0              # the game's SpawnPerUnit: one puff per 32 uu the exhaust travels
 
     def set_quality(self, level):
@@ -793,8 +792,8 @@ class FX:
         self.puff_age[n:n + k] = 0.0
         self.puff_seed[n:n + k] = self._rng.uniform(0.0, 1.0, k)
         self.puff_acc[n:n + k] = self._rng.uniform(15.0, 30.0, k)    # the game's Acceleration: z 15..30 uu/s^2
-        # the boost actor's ParticleSize 35..50 uu, x1.35: our soft, wispy edge shows less of the sprite than the game's
-        self.puff_size[n:n + k] = self._rng.uniform(35.0, 50.0, k) * 1.35
+        # the boost actor's ParticleSize 35..50 uu (x0.95)
+        self.puff_size[n:n + k] = self._rng.uniform(35.0, 50.0, k) * 0.95
         self.puff_n = n + k
 
     def boost(self, key, pos, fwd, up, car_vel, team, dt, model_bytes=None):
@@ -829,7 +828,7 @@ class FX:
         f = ((np.arange(1, k + 1, dtype="f4") * self.PUFF_SPACING - d0) / max(L, 1e-3)).clip(0.0, 1.0)
         pts = []
         for side in (-1.0, 1.0):
-            cnt = rng.integers(1, 4, k)                          # 1..3 per 32 uu step: continuous, lumpy
+            cnt = rng.integers(1, 3, k)                          # 1..2 per 32 uu step: separate puffs, a clear stream
             ff = np.repeat(f, cnt)
             if len(ff) == 0:
                 continue
